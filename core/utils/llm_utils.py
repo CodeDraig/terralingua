@@ -3,19 +3,27 @@ import random
 import re
 import time
 import traceback
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Protocol
 
 import requests
 import tiktoken
 from openai import APIConnectionError, BadRequestError, OpenAIError, RateLimitError
 
-from core.agents.human_agent import HumanAgent
-from core.agents.llm_agent import LLMAgent
+
+class ActionSelectingAgent(Protocol):
+    agent_name: str
+    agent_tag: str
+    max_history: int
+
+    def select_action(self, **kwargs) -> Dict[str, Any]: ...
+
 
 MAX_CONTEXT_TOKENS = {
     "gpt-4.1-mini": {"base": 1047576},
     "gpt-5": {"base": 400_000},
     "gpt-5-mini": {"base": 400_000},
+    "gpt-5-nano": {"base": 400_000},
+    "gpt-5.4-nano": {"base": 400_000},
     "claude-sonnet-4-5-20250929": {"base": 200_000, "long": 1_000_000},
 }
 
@@ -23,19 +31,21 @@ MAX_OUTPUT_TOKENS = {
     "gpt-4.1-mini": 32768,
     "gpt-5": 128000,
     "gpt-5-mini": 128000,
+    "gpt-5-nano": 128000,
+    "gpt-5.4-nano": 128000,
     "claude-sonnet-4-5-20250929": 16000,
 }
 
 
 def select_with_retry(
-    agent: LLMAgent | HumanAgent,
+    agent: ActionSelectingAgent,
     observation,
     available_actions,
     reward,
     info,
     ts,
     llm_client,
-    llm_chat_params,
+    llm_request_params,
     retries=3,
     backoff_base=1.5,
 ):
@@ -49,7 +59,7 @@ def select_with_retry(
                 info=info,
                 time=ts,
                 available_actions=available_actions,
-                chat_params=llm_chat_params,
+                request_params=llm_request_params,
                 client=llm_client,
             )
             agent.max_history = original_history_len
@@ -58,7 +68,7 @@ def select_with_retry(
             print(
                 f"⚠️ Retry {attempt + 1}/{retries} {agent.agent_name}({agent.agent_tag}) Bad Request: {e}. Likely cause is too many tokens"
             )
-            agent.max_history -= 1
+            agent.max_history = max(0, agent.max_history - 1)
         except (RateLimitError, APIConnectionError, OpenAIError) as e:
             wait_time = backoff_base**attempt + random.uniform(0, 0.5)
             print(

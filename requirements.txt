@@ -3,7 +3,7 @@ pandas
 pygame
 gymnasium
 pettingzoo
-openai
+openai>=2.36.0,<3
 anthropic
 python-dotenv
 matplotlib

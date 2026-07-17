@@ -1,12 +1,7 @@
 import json
-import math
-import os
 import pickle as pkl
-import sys
-import traceback
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -25,12 +20,11 @@ from openai import BadRequestError
 from tqdm import tqdm
 
 from analysis_scripts.error_tracker import ErrorTracker
+from analysis_scripts.prompt_contracts import guarded_system_prompt, simulation_data
 from core.utils import ROOT
 from core.utils.llm_client import LLMClient
 from core.utils.llm_utils import (
     MAX_CONTEXT_TOKENS,
-    MAX_OUTPUT_TOKENS,
-    count_tokens,
     is_context_enough,
 )
 
@@ -58,8 +52,8 @@ NOVELTY_SAMPLES = 5
 PARALLEL = True
 LLM_PROVIDER = "anthropic"
 LLM_MODEL = "claude-sonnet-4-5-20250929"
-LLM_CHAT_PARAMS = {
-    # "response_format": {"type": "json_object"},
+LLM_REQUEST_PARAMS = {
+    # "text": {"format": {"type": "json_object"}},
 }
 
 # Novelty analysis configuration
@@ -74,14 +68,14 @@ PRUNE_NOVELTY_THRESHOLD = 1  # Only prune artifacts with novelty <= this value
 
 # Prompts
 # ---------------------------
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT = guarded_system_prompt("""
 You are a rigorous novelty analyst.
 Your task is to evaluate how conceptually novel and interesting each artifact is relative to all previously seen artifacts.
 Output VALID JSON ONLY matching the schema.
 Never invent IDs.
 Compare each new artifact ONLY against the previous artifacts. DO NOT compare artifacts with the ones in the same timestep.
 Note: It is extremely important that you get this right, as this will be used for scientific analysis.
-"""
+""")
 
 USER_PROMPT = """Analyze the novelty of the new artifacts compared to the previous artifacts.
 
@@ -121,7 +115,7 @@ Strict rules:
 
 Your output must follow this exact format:
 ```json
-{{artifact_id: novelty_score, ...}}
+{{"<artifact_id>": <novelty_score>}}
 ```
 
 Here are the artifacts:
@@ -199,8 +193,12 @@ def check_and_prepare_context(messages, llm_client, previous_artifacts, new_arti
 
         # Rebuild messages with pruned artifacts
         user_prompt = USER_PROMPT.format(
-            previous_artifacts=json.dumps(previous_artifacts),
-            new_artifacts=json.dumps(new_artifacts),
+            previous_artifacts=simulation_data(
+                "previous-artifacts", json.dumps(previous_artifacts)
+            ),
+            new_artifacts=simulation_data(
+                "new-artifacts", json.dumps(new_artifacts)
+            ),
         )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -208,7 +206,7 @@ def check_and_prepare_context(messages, llm_client, previous_artifacts, new_arti
         ]
 
         # Check if it fits now
-        max_tokens = (
+        max_context_tokens = (
             MAX_CONTEXT_TOKENS[LLM_MODEL]["long"]
             if llm_client.long_context
             else MAX_CONTEXT_TOKENS[LLM_MODEL]["base"]
@@ -216,7 +214,7 @@ def check_and_prepare_context(messages, llm_client, previous_artifacts, new_arti
 
         if is_context_enough(
             messages=messages,
-            max_input_tokens=max_tokens,
+            max_input_tokens=max_context_tokens,
             model=LLM_MODEL,
         ):
             print("Context now fits after pruning.")
@@ -233,7 +231,7 @@ def get_novelty_sample(llm_client, messages, sample_idx, ts):
             response = llm_client.get_response(
                 model=LLM_MODEL,
                 messages=messages,
-                chat_parameters=LLM_CHAT_PARAMS,
+                request_parameters=LLM_REQUEST_PARAMS,
                 enable_error_reprompting=False,
                 output_json=True,
             )
@@ -331,8 +329,12 @@ def main(
 
             if new_artifacts:
                 user_prompt = USER_PROMPT.format(
-                    previous_artifacts=json.dumps(previous_artifacts),
-                    new_artifacts=json.dumps(new_artifacts),
+                    previous_artifacts=simulation_data(
+                        "previous-artifacts", json.dumps(previous_artifacts)
+                    ),
+                    new_artifacts=simulation_data(
+                        "new-artifacts", json.dumps(new_artifacts)
+                    ),
                 )
 
                 messages = [
@@ -412,7 +414,7 @@ def main(
                                 response = llm_client.get_response(
                                     model=LLM_MODEL,
                                     messages=messages,
-                                    chat_parameters=LLM_CHAT_PARAMS,
+                                    request_parameters=LLM_REQUEST_PARAMS,
                                     enable_error_reprompting=False,
                                     output_json=True,
                                 )

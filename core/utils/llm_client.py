@@ -12,6 +12,73 @@ from openai import BadRequestError, OpenAI
 load_dotenv()
 
 
+_RESPONSES_ONLY_PARAMS = {"text", "reasoning", "store"}
+
+
+class ResponseRejectedError(ValueError):
+    """A Responses result that cannot satisfy the caller's text contract."""
+
+    def __init__(
+        self, message: str, *, input_tokens: int = 0, output_tokens: int = 0
+    ):
+        super().__init__(message)
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
+def _split_responses_input(messages: list[dict]) -> tuple[str | None, list[dict]]:
+    """Split system guidance from ordered Responses input messages."""
+    system_messages = []
+    input_messages = []
+    for message in messages:
+        if message["role"] == "system":
+            system_messages.append(str(message["content"]))
+        else:
+            input_messages.append(message.copy())
+
+    instructions = "\n\n".join(system_messages) if system_messages else None
+    return instructions, input_messages
+
+
+def _build_responses_request(messages: list[dict], request_parameters: dict) -> dict:
+    """Build a stateless Responses request without mutating caller data."""
+    instructions, input_messages = _split_responses_input(messages)
+    request = request_parameters.copy()
+    request["store"] = False
+    request["input"] = input_messages
+    if instructions is not None:
+        request["instructions"] = instructions
+    return request
+
+
+def _read_responses_result(response: Any) -> tuple[str, int, int]:
+    """Normalize one completed Responses result to TerraLingua's text contract."""
+    usage = getattr(response, "usage", None)
+    input_tokens = getattr(usage, "input_tokens", 0) if usage is not None else 0
+    output_tokens = getattr(usage, "output_tokens", 0) if usage is not None else 0
+
+    status = getattr(response, "status", None)
+    if status != "completed":
+        detail = getattr(response, "error", None) or getattr(
+            response, "incomplete_details", None
+        )
+        raise ResponseRejectedError(
+            f"OpenAI Responses request ended with status {status!r}: {detail}",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+    text = getattr(response, "output_text", None)
+    if not isinstance(text, str) or not text.strip():
+        raise ResponseRejectedError(
+            "OpenAI Responses request returned no text output.",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+    return text.strip(), input_tokens, output_tokens
+
+
 @dataclass
 class Response:
     content: str | None | Dict
@@ -29,7 +96,7 @@ class LLMClient:
             provider="openai",
             model="gpt-4",
             messages=[{"role": "system", "content": "..."}, ...],
-            chat_parameters={"temperature": 0.7},
+            request_parameters={"temperature": 0.7},
             token_counter={"input": 0, "output": 0}
         )
     """
@@ -80,19 +147,19 @@ class LLMClient:
         return text
 
     def _extract_json(
-        self, text: str, has_response_format: bool
+        self, text: str, has_structured_output: bool
     ) -> tuple[str | None, str | None]:
         """
         Extract JSON from response text.
 
         Args:
             text: Response text
-            has_response_format: Whether response_format was specified in chat_parameters
+            has_structured_output: Whether a Responses text format was requested
 
         Returns:
             Tuple of (json_string, error_message)
         """
-        if has_response_format:
+        if has_structured_output:
             # Model should return pure JSON
             return text, None
 
@@ -109,7 +176,7 @@ class LLMClient:
         return None, "Error: No valid JSON found in response"
 
     def _call_openai(
-        self, model: str, messages: list[dict], chat_parameters: dict
+        self, model: str, messages: list[dict], request_parameters: dict
     ) -> tuple[str, int, int]:
         """
         Call OpenAI API.
@@ -118,20 +185,14 @@ class LLMClient:
             Tuple of (response_text, input_tokens, output_tokens)
         """
         self._openai_client = self._get_openai_client()
-        resp = self._openai_client.chat.completions.create(
-            **{
-                **chat_parameters,
-                "model": model,
-                "messages": messages,
-            }
+        request = _build_responses_request(
+            messages, {**request_parameters, "model": model}
         )
-        text = resp.choices[0].message.content.strip()
-        input_tokens = resp.usage.prompt_tokens
-        output_tokens = resp.usage.completion_tokens
-        return text, input_tokens, output_tokens
+        response = self._openai_client.responses.create(**request)
+        return _read_responses_result(response)
 
     def _call_anthropic(
-        self, model: str, messages: list[dict], chat_parameters: dict
+        self, model: str, messages: list[dict], request_parameters: dict
     ) -> tuple[str, int, int]:
         """
         Call Anthropic API.
@@ -156,16 +217,16 @@ class LLMClient:
         kwargs = {
             "model": model,
             "messages": anthropic_messages,
-            "max_tokens": chat_parameters.get("max_tokens", 10000),
+            "max_tokens": request_parameters.get("max_output_tokens", 10000),
         }
 
         # Add system message if present
         if system_message:
             kwargs["system"] = system_message
 
-        # Add other chat parameters (excluding OpenAI-specific ones)
-        for key, value in chat_parameters.items():
-            if key not in ["max_tokens", "response_format"]:
+        # Add parameters supported by Anthropic's Messages API.
+        for key, value in request_parameters.items():
+            if key not in _RESPONSES_ONLY_PARAMS and key != "max_output_tokens":
                 kwargs[key] = value
 
         resp = self._anthropic_client.messages.create(**kwargs)
@@ -187,7 +248,7 @@ class LLMClient:
         self,
         model: str,
         messages: list[dict],
-        chat_parameters: dict | None = None,
+        request_parameters: dict | None = None,
         max_retries: int = 10,
         enable_error_reprompting: bool = True,
         track_tokens: bool = True,
@@ -197,40 +258,38 @@ class LLMClient:
         Make an LLM API call with retry logic and JSON parsing.
 
         Args:
-            provider: "openai" or "anthropic"
             model: Model name (e.g., "gpt-4", "claude-sonnet-4-5")
             messages: List of message dicts with "role" and "content"
-            chat_parameters: Additional parameters for the API call (temperature, response_format, etc.)
+            request_parameters: Provider-neutral generation parameters using the
+                OpenAI Responses shape where the providers differ
             max_retries: Maximum number of retry attempts
             enable_error_reprompting: If True, append error messages to retry
             track_tokens: If True, track token usage
-            token_counter: Dict to accumulate tokens (must have "input" and "output" keys)
             output_json: If True, parse response as JSON; otherwise return raw text
 
         Returns:
-            Tuple of (response, token_counter) where:
-                - response is dict if output_json=True, str otherwise
-                - token_counter is the updated token counter dict
+            Response containing parsed JSON or raw text plus accumulated usage
 
         Raises:
             BadRequestError: Re-raised if caller wants to handle token overflow (OpenAI only)
             Exception: If max retries exhausted or other unhandled errors
         """
-        if chat_parameters is None:
-            chat_parameters = {}
+        if request_parameters is None:
+            request_parameters = {}
 
         token_counter = {"input": 0, "output": 0}
 
         # Create a working copy of messages to allow retry modifications
         messages_copy = list(messages)
 
-        has_response_format = "response_format" in chat_parameters
+        text_format = request_parameters.get("text", {}).get("format", {})
+        has_structured_output = text_format.get("type") not in (None, "text")
 
         for trial in range(max_retries):
             try:
                 # Make API call based on provider
                 text, input_tokens, output_tokens = self._call_client(
-                    model, messages_copy, chat_parameters
+                    model, messages_copy, request_parameters
                 )
 
                 # Track tokens
@@ -260,7 +319,7 @@ class LLMClient:
                     pass  # Fall through to retry logic below
 
                 # Parse JSON response
-                json_str, error_msg = self._extract_json(text, has_response_format)
+                json_str, error_msg = self._extract_json(text, has_structured_output)
 
                 if json_str:
                     try:
@@ -298,6 +357,14 @@ class LLMClient:
                     ]
                 )
 
+            except ResponseRejectedError as e:
+                if track_tokens:
+                    token_counter["input"] += e.input_tokens
+                    token_counter["output"] += e.output_tokens
+                if trial == max_retries - 1:
+                    raise Exception(
+                        f"Failed after {max_retries} retries. Last error: {str(e)}"
+                    )
             except BadRequestError as e:
                 # Re-raise BadRequestError for caller to handle (e.g., token reduction)
                 raise e
@@ -315,11 +382,8 @@ class AgentClient:
     """
     Client used for the LLM agents in the environment.
     This is very simple as all the parsing etc is done outside by the agent itself.
-    Supports both OpenAI-compatible endpoints and the Anthropic API.
+    Supports Responses-compatible OpenAI endpoints and the Anthropic API.
     """
-
-    # Keys in chat_params that are OpenAI-specific and must be stripped for Anthropic
-    _OPENAI_ONLY_PARAMS = {"response_format", "reasoning_effort"}
 
     def __init__(self, provider: str = "openai", **kwargs):
         self.provider = provider
@@ -334,32 +398,27 @@ class AgentClient:
             raise ValueError(f"Unsupported provider: {provider}")
 
     def get_response(
-        self, messages: List[Dict[str, str]], chat_params: Dict
+        self, messages: List[Dict[str, str]], request_params: Dict
     ) -> Response:
         if self.provider == "openai":
-            return self._get_response_openai(messages, chat_params)
+            return self._get_response_openai(messages, request_params)
         else:
-            return self._get_response_anthropic(messages, chat_params)
+            return self._get_response_anthropic(messages, request_params)
 
     def _get_response_openai(
-        self, messages: List[Dict[str, str]], chat_params: Dict
+        self, messages: List[Dict[str, str]], request_params: Dict
     ) -> Response:
-        response = self._client.chat.completions.create(
-            **{**chat_params, "messages": messages}
-        )
-        input_tokens = 0
-        output_tokens = 0
-        if response.usage is not None:
-            input_tokens = response.usage.prompt_tokens
-            output_tokens = response.usage.completion_tokens
+        request = _build_responses_request(messages, request_params)
+        response = self._client.responses.create(**request)
+        text, input_tokens, output_tokens = _read_responses_result(response)
         return Response(
-            content=response.choices[0].message.content,
+            content=text,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         )
 
     def _get_response_anthropic(
-        self, messages: List[Dict[str, str]], chat_params: Dict
+        self, messages: List[Dict[str, str]], request_params: Dict
     ) -> Response:
         # Anthropic takes system as a top-level param, not inside messages
         system_message = None
@@ -371,16 +430,16 @@ class AgentClient:
                 anthropic_messages.append(msg)
 
         kwargs = {
-            "model": chat_params.get("model"),
+            "model": request_params.get("model"),
             "messages": anthropic_messages,
-            "max_tokens": chat_params.get("max_tokens", 4096),
+            "max_tokens": request_params.get("max_output_tokens", 4096),
         }
         if system_message:
             kwargs["system"] = system_message
 
-        # Pass through all chat_params, excluding OpenAI-specific keys
-        for key, value in chat_params.items():
-            if key not in self._OPENAI_ONLY_PARAMS and key != "max_tokens":
+        # Pass through parameters supported by Anthropic's Messages API.
+        for key, value in request_params.items():
+            if key not in _RESPONSES_ONLY_PARAMS and key != "max_output_tokens":
                 kwargs[key] = value
 
         response = self._client.messages.create(**kwargs)

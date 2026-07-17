@@ -13,8 +13,6 @@ Outputs:
 
 import json
 import math
-import os
-import pickle as pkl
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -25,7 +23,6 @@ import numpy as np
 import pandas as pd
 from cdlib import algorithms
 
-from core.utils import ROOT
 from core.utils.analysis_utils import load_agent_log, load_worldlog
 
 # TODO add sent analysis of messages (to differentiate between positive and negative interactions)

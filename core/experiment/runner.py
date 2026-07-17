@@ -9,13 +9,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, List
+from typing import Dict
 
 import numpy as np
 from PIL import Image
 
 from core.agents.human_agent import HumanAgent
 from core.agents.llm_agent import LLMAgent
+from core.agents.procedural_names import procedural_name
 from core.environment.env import OpenGridWorld
 from core.experiment.checkpoint import CheckpointManager
 from core.experiment.config import ExperimentConfig
@@ -115,9 +116,15 @@ class SimulationRunner:
         genome_cls = self._get_genome_cls()
         for agent_tag, agent_type in init_agents.items():
             if agent_type == "text":
+                agent_index = int(
+                    agent_tag.removeprefix(
+                        self.params.agent.agents_name_prefix
+                    )
+                )
+                agent_name = self._agent_name(agent_tag, agent_index)
                 self.agents[agent_tag] = LLMAgent(
                     agent_tag=agent_tag,
-                    agent_name=agent_tag,
+                    agent_name=agent_name,
                     log_dir=self.exp_logdir,
                     max_history=self.params.agent.max_history,
                     obs_style=self.params.agent.obs_style,
@@ -126,10 +133,11 @@ class SimulationRunner:
                     food_mechanism=self.params.env.food_mechanism,
                     genome=genome_cls().random(),
                     exogenous_motivation=self.params.agent.exogenous_motivation,
+                    internal_memory_size=self.params.agent.internal_memory_size,
                 )
                 self.env.add_agent(
                     agent_tag=agent_tag,
-                    agent_name=agent_tag,
+                    agent_name=agent_name,
                     agent_type=init_agents[agent_tag],
                 )
             elif agent_type == "human":
@@ -161,6 +169,21 @@ class SimulationRunner:
         self.rewards = {}
         self.dones = {a: False for a in self.agents.keys()}
 
+    def _agent_name(self, agent_tag: str, agent_index: int) -> str:
+        """Choose a display name without changing the stable agent tag."""
+        if not self.params.agent.procedural_names:
+            return agent_tag
+
+        candidate = procedural_name(self.params.agent.name_seed, agent_index)
+        existing_names = set(getattr(self.env, "agent_names", {}).values())
+        if candidate not in existing_names:
+            return candidate
+
+        suffix = 2
+        while f"{candidate}{suffix}" in existing_names:
+            suffix += 1
+        return f"{candidate}{suffix}"
+
     def _load_state(self):
         """Loads state and environment from checkpoint."""
         self.ckpt = self.checkpointer.load_checkpoint()
@@ -183,6 +206,7 @@ class SimulationRunner:
                     food_mechanism=self.params.env.food_mechanism,
                     genome=genome_cls().random(),  # Temporary genome, will be loaded
                     exogenous_motivation=self.params.agent.exogenous_motivation,
+                    internal_memory_size=self.params.agent.internal_memory_size,
                 )
             elif agent_ckpt["type"] == "HumanAgent":
                 agent = HumanAgent(
@@ -207,9 +231,30 @@ class SimulationRunner:
         self.infos = self.ckpt["env_outs"]["infos"]
         self.rewards = self.ckpt["env_outs"]["rewards"]
         self.dones = self.ckpt["env_outs"]["dones"]
+        self._repair_incomplete_checkpoint_outputs()
         print(
             "Resumed environment and agents from checkpoint. Current timestep:",
             self.start_ts,
+        )
+
+    def _repair_incomplete_checkpoint_outputs(self):
+        """Rebuild observations when a failed step saved incomplete outputs."""
+        missing_actions = [
+            agent_tag
+            for agent_tag in self.agents
+            if agent_tag in self.env.agent_registry
+            and "available_actions" not in self.infos.get(agent_tag, {})
+        ]
+        if not missing_actions:
+            return
+
+        self.obs = self.env._observe_all()
+        for agent_tag in self.obs:
+            self.infos.setdefault(agent_tag, {})["available_actions"] = (
+                self.env._get_avail_actions(agent_tag)
+            )
+        print(
+            "Rebuilt observations and available actions for an incomplete checkpoint."
         )
 
     def _render(self, ts: int):
@@ -292,6 +337,7 @@ class SimulationRunner:
                             use_inventory=self.params.agent.use_inventory,
                             food_mechanism=self.params.env.food_mechanism,
                             exogenous_motivation=self.params.agent.exogenous_motivation,
+                            internal_memory_size=self.params.agent.internal_memory_size,
                         )
                     print(f"🍼 Agent {agent_tag} reproduced. New agent: {child_tag} 🍼")
                     # No need to register agent in environment, as env already did so.
@@ -317,7 +363,9 @@ class SimulationRunner:
                 # We check env.agent_names so to verify against dead agents as well.
                 if new_agent_tag not in self.env.agent_names:
                     break
-            new_agent_name = new_agent_tag
+            new_agent_name = self._agent_name(
+                new_agent_tag, self.last_spawn_idx
+            )
             self.agents[new_agent_tag] = LLMAgent(
                 agent_tag=new_agent_tag,
                 agent_name=new_agent_name,
@@ -327,6 +375,7 @@ class SimulationRunner:
                 use_internal_memory=self.params.agent.use_internal_memory,
                 use_inventory=self.params.agent.use_inventory,
                 food_mechanism=self.params.env.food_mechanism,
+                internal_memory_size=self.params.agent.internal_memory_size,
             )
             # Register in environment
             obs, infos = self.env.add_agent(
@@ -350,6 +399,7 @@ class SimulationRunner:
         max_ts = self.params.run.max_ts
         ckpt_interval = self.params.run.ckpt_interval
         empty_countdown = self.params.run.empty_countdown
+        next_ts = self.start_ts
         try:
             with ThreadPoolExecutor(
                 max_workers=self.params.run.max_parallel_workers
@@ -435,6 +485,7 @@ class SimulationRunner:
                     self.obs, self.rewards, self.dones, _, self.infos = self.env.step(
                         actions
                     )
+                    next_ts = ts + 1
 
                     self._handle_reproduction()
                     self._cleanup_dead()
@@ -461,18 +512,19 @@ class SimulationRunner:
 
         # Final cleanup and saves
         # ---------------------------
-        self._save_checkpoint(ts=ts + 1)
+        self._save_checkpoint(ts=next_ts)
 
         # Render last frame
-        self._render(ts=ts + 1)
+        self._render(ts=next_ts)
 
         self.env.close()
         for agent in self.agents.values():
             agent.close()
 
-        create_video(
-            str(self.exp_logdir / "frames" / "%05d.png"),
-            output_file=str(self.exp_logdir / "video.mp4"),
-            fps=self.params.run.video_fps,
-        )
+        if self.params.run.save_video:
+            create_video(
+                str(self.exp_logdir / "frames" / "%05d.png"),
+                output_file=str(self.exp_logdir / "video.mp4"),
+                fps=self.params.run.video_fps,
+            )
         # ---------------------------

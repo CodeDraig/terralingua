@@ -2,7 +2,6 @@ import os
 import pickle as pkl
 import traceback
 from collections import defaultdict
-from pathlib import Path
 
 import networkx as nx
 import numpy as np
@@ -117,7 +116,7 @@ def main(exp_name):
         commsT, node2comT = get_slpa_communities(GT)
         try:
             mod = compute_modularity(UGT, comms=commsT)
-        except:
+        except Exception:
             mod = 0
         H, Hn, K = compute_partition_entropy(UGT, comms=commsT)
         mean_P, std_P = compute_participation_stats(UGT, commsT, node2comT)

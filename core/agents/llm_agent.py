@@ -12,7 +12,6 @@ import tiktoken
 from core.agents.agent_logger import AgentLogger
 from core.agents.prompt_templates import (
     AGENT_PROMPT,
-    AVAILABLE_EX_MOTIVATIONS,
     DEBUG_PROMPT,
     ERROR_MSG,
     MOTIVATIONS,
@@ -21,7 +20,7 @@ from core.agents.prompt_templates import (
 )
 from core.genome.base_genome import Genome
 from core.genome.ocean_5 import Genome as Ocean5Genome
-from core.utils.llm_client import AgentClient
+from core.utils.llm_client import AgentClient, ResponseRejectedError
 
 
 class LLMAgent:
@@ -111,7 +110,7 @@ class LLMAgent:
         reward: int,
         info: dict | None,
         time: int,
-        chat_params: dict,
+        request_params: dict,
         client: AgentClient,
         max_attempts=5,
     ) -> Dict[str, str]:
@@ -128,8 +127,12 @@ class LLMAgent:
             available_actions=available_actions,
         )
 
-        chat_params = chat_params if chat_params is not None else {"model": "o4-mini"}
-        post_prompt = chat_params.pop("post_prompt", None)
+        request_params = (
+            request_params.copy()
+            if request_params is not None
+            else {"model": "o4-mini"}
+        )
+        post_prompt = request_params.pop("post_prompt", None)
         if post_prompt is not None:
             prompt += "\n\n" + post_prompt
 
@@ -144,7 +147,21 @@ class LLMAgent:
         # ================================
         for attempt in range(max_attempts):
             action = None
-            resp = client.get_response(messages=messages, chat_params=chat_params)
+            try:
+                resp = client.get_response(
+                    messages=messages, request_params=request_params
+                )
+            except ResponseRejectedError as e:
+                total_input_tokens += e.input_tokens
+                total_output_tokens += e.output_tokens
+                if self.verbose >= 1:
+                    print(
+                        f"Rejected response from agent "
+                        f"{self.agent_name}({self.agent_tag}): {e}"
+                    )
+                if self.verbose >= 2:
+                    print(f"Retrying attempt: {attempt + 1}")
+                continue
 
             text = resp.content.strip()  # type: ignore
             total_input_tokens += resp.input_tokens
@@ -163,7 +180,9 @@ class LLMAgent:
                     text, available_actions=available_actions
                 )
                 self.history.append((formatted_obs, act, message, params, info))
-                self.history = self.history[-self.max_history :]
+                self.history = (
+                    self.history[-self.max_history :] if self.max_history > 0 else []
+                )
                 self.internal_memory = internal_memory
 
                 action = {"action": act, "message": message, "params": params}
@@ -181,7 +200,7 @@ class LLMAgent:
                 error_msg = ERROR_MSG.render(
                     error=e,
                     action_keys=available_actions.keys(),
-                    use_internal_memory=self.internal_memory,
+                    use_internal_memory=self.use_internal_memory,
                 )
                 no_reason_text = (
                     text.split("</think>")[1] if "</think>" in text else text
@@ -257,7 +276,7 @@ class LLMAgent:
         direction_grid[1:-1, 0] = "left"
         direction_grid[1:-1, -1] = "right"
 
-        return "\n".join(" ".join(row) for row in formatted_grid)
+        return "\n".join(" ".join(row) for row in direction_grid)
 
     def _format_list(self, obs_dict: dict):
         formatted = ""
@@ -300,7 +319,7 @@ class LLMAgent:
     def _make_prompt(self, formatted_obs, available_actions, internal_memory, info):
         # Build history section
         history_txt = ""
-        if self.history:
+        if self.history and self.max_history > 0:
             history_txt = f"=== History (last {min(len(self.history), self.max_history)} steps) ===\n"
             for i, (
                 past_obs,
@@ -415,11 +434,11 @@ class LLMAgent:
 
     def validate_internal_memory(self, internal_memory: str) -> str:
         """Ensure internal memory is within token limits."""
+        if self.internal_memory_size <= 0:
+            return ""
         tokens = self.internal_memory_encoder.encode(str(internal_memory))
-        if len(tokens) > self.internal_memory_size + 100:
-            # Truncate to last (internal_memory_size + 100) tokens
-            # We cut to (internal_memory_size + 100) rather than internal_memory_size to leave some margin
-            tokens = tokens[-(self.internal_memory_size + 100) :]
+        if len(tokens) > self.internal_memory_size:
+            tokens = tokens[-self.internal_memory_size :]
             internal_memory = self.internal_memory_encoder.decode(tokens)
         return internal_memory
 
@@ -443,6 +462,7 @@ class LLMAgent:
             "max_history": self.max_history,
             "verbose": self.verbose,
             "debug": self.debug,
+            "internal_memory_size": self.internal_memory_size,
             "internal_memory": self.internal_memory,
             "history": self.history,
             "log_dir": str(self.logger.log_dir),
@@ -452,6 +472,9 @@ class LLMAgent:
     def set_state_ckpt(self, state_ckpt: dict):
         self.agent_name = state_ckpt["name"]
         self.agent_tag = state_ckpt["tag"]
+        self.internal_memory_size = int(
+            state_ckpt.get("internal_memory_size", self.internal_memory_size)
+        )
         self.system_prompt = state_ckpt["system_prompt"]
         self.obs_style = state_ckpt["obs_style"]
         self.use_internal_memory = state_ckpt["use_internal_memory"]

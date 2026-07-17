@@ -10,6 +10,8 @@ MODEL_MAP = {
     "o3-mini": "o3-mini",
     "gpt-5.1": "gpt-5.1",
     "gpt-5-mini": "gpt-5-mini",
+    "gpt-5-nano": "gpt-5-nano",
+    "gpt-5.4-nano": "gpt-5.4-nano",
     "QWEN2.5": "Qwen/Qwen2.5-32B-Instruct",
     "QWEN3": "Qwen/Qwen3-32B",
     "DeepSeek-R1-32": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
@@ -74,26 +76,26 @@ class LLMRouter:
             llm_client = AgentClient(
                 base_url=f"http://127.0.0.1:{port}/v1", api_key="EMPTY"
             )
-            llm_chat_params = {
+            llm_request_params = {
                 "model": "Qwen/Qwen2.5-32B-Instruct",
-                "response_format": {"type": "json_object"},
+                "text": {"format": {"type": "json_object"}},
                 "temperature": 1,
             }
         elif self.model_name == MODEL_MAP["QWEN3"]:
             llm_client = AgentClient(
                 base_url=f"http://127.0.0.1:{port}/v1", api_key="EMPTY"
             )
-            llm_chat_params = {
+            llm_request_params = {
                 "model": "Qwen/Qwen3-32B",
-                "response_format": {"type": "json_object"},
+                "text": {"format": {"type": "json_object"}},
                 "temperature": 1,
-                "max_tokens": 256,  # Limit output to 256 tokens
+                "max_output_tokens": 256,
             }
         elif self.model_name == MODEL_MAP["DeepSeek-R1-32"]:
             llm_client = AgentClient(
                 base_url=f"http://127.0.0.1:{port}/v1", api_key="EMPTY"
             )
-            llm_chat_params = {
+            llm_request_params = {
                 "model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
                 "temperature": 1,
                 "post_prompt": "NOTE: do NOT spend too much time and tokens reasoning.",
@@ -102,52 +104,52 @@ class LLMRouter:
             llm_client = AgentClient(
                 base_url=f"http://127.0.0.1:{port}/v1", api_key="EMPTY"
             )
-            llm_chat_params = {
+            llm_request_params = {
                 "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
                 "temperature": 1,
                 "post_prompt": "NOTE: do NOT spend too much time and tokens reasoning.",
             }
         else:
             raise ValueError(f"Unsupported local model: {self.model_name}.")
-        return llm_client, llm_chat_params
+        return llm_client, llm_request_params
 
     def _build_remote_client(self):
         if self.model_name == "o4-mini":
             llm_client = AgentClient(provider="openai")
-            llm_chat_params = {
+            llm_request_params = {
                 "model": "o4-mini",
-                "response_format": {"type": "json_object"},
+                "text": {"format": {"type": "json_object"}},
             }
         elif self.model_name == "o3-mini":
             llm_client = AgentClient(provider="openai")
-            llm_chat_params = {
+            llm_request_params = {
                 "model": "o3-mini",
-                "response_format": {"type": "json_object"},
-                "reasoning_effort": "low",
+                "text": {"format": {"type": "json_object"}},
+                "reasoning": {"effort": "low"},
             }
         elif self.model_name == "gpt-5.1":
             llm_client = AgentClient(provider="openai")
-            llm_chat_params = {
+            llm_request_params = {
                 "model": "gpt-5.1",
-                "response_format": {"type": "json_object"},
-                "reasoning_effort": "low",
+                "text": {"format": {"type": "json_object"}},
+                "reasoning": {"effort": "low"},
             }
-        elif self.model_name == "gpt-5-mini":
+        elif self.model_name in {"gpt-5-mini", "gpt-5-nano", "gpt-5.4-nano"}:
             llm_client = AgentClient(provider="openai")
-            llm_chat_params = {
-                "model": "gpt-5-mini",
-                "response_format": {"type": "json_object"},
-                "reasoning_effort": "low",
+            llm_request_params = {
+                "model": self.model_name,
+                "text": {"format": {"type": "json_object"}},
+                "reasoning": {"effort": "low"},
             }
         elif "claude" in str(self.model_name).lower():
             llm_client = AgentClient(provider="anthropic")
-            llm_chat_params = {
+            llm_request_params = {
                 "model": self.model_name,
-                "max_tokens": 4096,
+                "max_output_tokens": 4096,
             }
         else:
             raise ValueError(f"Unsupported model: {self.model_name}.")
-        return llm_client, llm_chat_params
+        return llm_client, llm_request_params
 
     def next(self):
         return next(self.cycle)

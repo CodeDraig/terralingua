@@ -15,7 +15,7 @@ dependencies = [
     "pygame",
     "gymnasium",
     "pettingzoo",
-    "openai",
+    "openai>=2.36.0,<3",
     "anthropic",
     "python-dotenv",
     "matplotlib",
@@ -63,10 +63,6 @@ exclude = ["__pycache__", ".venv", ".ruff_cache", ".git", "*.egg-info"]
 # Set the line length to match Black / PEP8-style defaults
 line-length = 88
 
-# Apply all default linting rules except F401 (unused imports)
-select = ["E", "F", "W", "I"]  # E: pycodestyle, F: pyflakes, W: warnings, I: isort
-ignore = ["F401"]
-
 # Enable import sorting (compatible with isort)
 fix = true
 
@@ -79,6 +75,10 @@ quote-style = "double"  # or "single" if preferred
 indent-style = "space"
 
 [tool.ruff.lint]
+# Apply all default linting rules except F401 (unused imports)
+select = ["E", "F", "W", "I"]  # E: pycodestyle, F: pyflakes, W: warnings, I: isort
+ignore = ["F401"]
+
 # Optional: Only apply linting to these folders
 # path = ["src", "tests"]
 

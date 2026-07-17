@@ -34,8 +34,8 @@ pip install -r requirements.txt
 **Using conda:**
 
 ```bash
-conda create -n terralinguia python=3.13
-conda activate terralinguia
+conda create -n terralingua python=3.13
+conda activate terralingua
 pip install -r requirements.txt
 ```
 
@@ -53,13 +53,26 @@ Run directly with `main.py` using CLI flags:
 python main.py --exp_name my_experiment --init_agents 10 --max_ts 200 --model claude-haiku-4-5
 ```
 
-Or use `run_experiment.sh`, a fully annotated template with all available options documented:
+Or use `run_experiment.sh`, an annotated template covering the common options:
 
 ```bash
 bash run_experiment.sh
 ```
 
 Logs are written to `logs/<exp_name>/`.
+
+Agents receive deterministic procedural display names by default while retaining
+stable tags such as `being0` for log files, checkpoints, and analysis. The
+default naming seed is `0`; use another integer to create a different
+reproducible roster:
+
+```bash
+python main.py --name_seed 1729
+```
+
+Because names are visible to agents, treat the seed as part of the experimental
+condition. Pass `--no-procedural_names` to use legacy `being0`, `being1`, …
+display names.
 
 ### Reproducing paper experiments
 
@@ -69,7 +82,19 @@ The `paper_experiment_scripts/` folder contains the exact scripts used to run ea
 bash paper_experiment_scripts/run_core.sh
 ```
 
+## Testing
+
+Run the local unit suite from the project root:
+
+```bash
+python -m unittest discover -v
+```
+
 ## Supported Agent Models
+
+OpenAI models use the OpenAI **Responses API** exclusively. Requests are
+stateless (`store=false`); TerraLingua retains the agent history and checkpoints
+locally.
 
 Pass any of the following keys via `--model`:
 
@@ -81,6 +106,8 @@ Pass any of the following keys via `--model`:
 | `o3-mini` | OpenAI | |
 | `gpt-5.1` | OpenAI | |
 | `gpt-5-mini` | OpenAI | |
+| `gpt-5-nano` | OpenAI | |
+| `gpt-5.4-nano` | OpenAI | |
 | `QWEN2.5` | Local (vLLM) | Qwen2.5-32B-Instruct |
 | `QWEN3` | Local (vLLM) | Qwen3-32B |
 | `DeepSeek-R1-32` | Local (vLLM) | DeepSeek-R1-Distill-Qwen-32B |
@@ -88,7 +115,11 @@ Pass any of the following keys via `--model`:
 
 ### Local models (vLLM)
 
-Local models require a running [vLLM](https://github.com/vllm-project/vllm) server. Start one (or more) on any of the default ports (`9000–9003`, `9010–9012`):
+Local models require a running [vLLM](https://github.com/vllm-project/vllm)
+server that exposes an OpenAI Responses-compatible `/v1/responses` endpoint.
+TerraLingua does not fall back to `/v1/chat/completions`; servers that only
+implement Chat Completions must be upgraded or reconfigured. Start one (or
+more) on any of the default ports (`9000–9003`, `9010–9012`):
 
 ```bash
 vllm serve Qwen/Qwen3-32B --port 9000

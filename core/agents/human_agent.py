@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import random
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -55,7 +54,7 @@ class HumanAgent:
         reward: int,
         info: dict | None,
         time: int,
-        chat_params: dict | None = None,
+        request_params: dict | None = None,
         client=None,
         max_attempts: int = 1,
     ) -> Dict[str, str]:
@@ -71,7 +70,7 @@ class HumanAgent:
             )
 
         self.history.append((formatted_obs, action_key, message, params, info))
-        self.history = self.history[-self.max_history :]
+        self.history = self.history[-self.max_history :] if self.max_history > 0 else []
 
         action_obj = {"action": action_key, "message": message, "params": params}
 

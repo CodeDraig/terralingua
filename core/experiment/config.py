@@ -13,7 +13,17 @@ from core.utils import ROOT
 class AgentConfig:
     agents_name_prefix: str = field(
         default="being",
-        metadata={"help": "Prefix for agent names (e.g. being0, being1)"},
+        metadata={"help": "Prefix for stable agent tags (e.g. being0, being1)"},
+    )
+    name_seed: int = field(
+        default=0,
+        metadata={"help": "Seed for deterministic procedural display names"},
+    )
+    procedural_names: bool = field(
+        default=True,
+        metadata={
+            "help": "Give agents procedural display names while retaining stable tags"
+        },
     )
     exogenous_motivation: str = field(
         default="base",

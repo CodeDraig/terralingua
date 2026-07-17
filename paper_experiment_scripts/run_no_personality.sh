@@ -14,6 +14,7 @@ python main.py \
     --exogenous_motivation  "base" \
     --genome                "no_traits" \
     --max_history           1 \
+    --no-procedural_names \
     \
     `# Environment` \
     --grid_size             50 \

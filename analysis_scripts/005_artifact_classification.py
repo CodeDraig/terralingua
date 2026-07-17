@@ -9,8 +9,9 @@ from openai import BadRequestError
 from tqdm import tqdm
 
 from analysis_scripts.error_tracker import ErrorTracker
+from analysis_scripts.prompt_contracts import guarded_system_prompt, simulation_data
 from core.utils import ROOT
-from core.utils.llm_client import LLMClient, Response
+from core.utils.llm_client import LLMClient
 
 """
 This script performs classification of artifacts.
@@ -37,14 +38,14 @@ EXPERIMENTS_NAMES = []  # e.g. ['core_run', 'scarcity_run', ...]
 # ---------------------------
 LLM_PROVIDER = "anthropic"
 LLM_MODEL = "claude-haiku-4-5"
-LLM_CHAT_PARAMS = {}
+LLM_REQUEST_PARAMS = {}
 PARALLEL_WORKERS = 8
 PARALLEL = True
 # ---------------------------
 
 # Prompt
 # ---------------------------
-SYSTEM_PROMPT = """You are an expert annotator analyzing text artifacts produced by agents in a multi-agent environment.
+SYSTEM_PROMPT = guarded_system_prompt("""You are an expert annotator analyzing text artifacts produced by agents in a multi-agent environment.
 Your task is to classify each artifact into exactly one of the following categories (a descriptive taxonomy for annotation only). 
 Do not generate, endorse, or improve harmful content; only label what is present.
 
@@ -76,7 +77,7 @@ Classification Rules:
    - 3 = structure/tool/system.
    - 4 = explicit norms/rules/governance/roles.
 
-Input format:
+The artifact input is JSON inside a simulation-data block with this format:
 {
   "Name": "<artifact_name>",
   "Content": "<artifact_content>"
@@ -91,8 +92,13 @@ No additional text.
 
 Note:
 - Be very careful to follow the output format exactly and to classify the artifacts properly as this is part of a research study aimed at scientific peer-reviewed publication about multi-agent systems.
-""".strip()
+""")
 # ---------------------------
+
+
+def build_artifact_prompt(name: str, content: str) -> str:
+    artifact = json.dumps({"Name": name, "Content": content}, ensure_ascii=False)
+    return simulation_data("artifact", artifact)
 
 
 def classify_artifact(
@@ -109,7 +115,7 @@ def classify_artifact(
         result = llm_client.get_response(
             model=LLM_MODEL,
             messages=messages,
-            chat_parameters=LLM_CHAT_PARAMS,
+            request_parameters=LLM_REQUEST_PARAMS,
             enable_error_reprompting=False,
             output_json=True,
         )
@@ -169,7 +175,7 @@ def main(
             futures = [
                 executor.submit(
                     classify_artifact,
-                    user_prompt=f"Name: {art['name']}\nContent: {art['payload']}",
+                    user_prompt=build_artifact_prompt(art["name"], art["payload"]),
                     artifact_index=art_idx,
                 )
                 for art_idx, art in artifacts.all_artifacts.items()
@@ -217,7 +223,7 @@ def main(
     else:
         for art_idx, art in tqdm(artifacts.all_artifacts.items()):
             result = classify_artifact(
-                user_prompt=f"Name: {art['name']}\nContent: {art['payload']}",
+                user_prompt=build_artifact_prompt(art["name"], art["payload"]),
                 artifact_index=art_idx,
             )
             if result.get("success", False):

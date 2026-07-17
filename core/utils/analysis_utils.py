@@ -22,7 +22,7 @@ def load_agent_log(filepath: Path | str, reduce: bool) -> dict:
         for line in f:
             if line.strip():  # skip empty lines
                 obj = json.loads(line)
-                
+
                 ts = (
                     int(obj["timestamp"])
                     if obj["timestamp"].isdigit()

@@ -44,7 +44,7 @@ class JSONLogger:
         safe_entry = self._sanitize(entry)
         try:
             self.fp.write(json.dumps(safe_entry) + "\n")
-        except:
+        except Exception:
             print(f"Failed logging: {safe_entry}")
 
         if event_type == Event.AGENT_ADDED:

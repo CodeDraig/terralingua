@@ -52,5 +52,9 @@ class CheckpointManager:
         flat_params = {}
         for p in saved_params.values():
             flat_params.update(p)
+        if "procedural_names" not in saved_params.get("agent", {}):
+            # Runs created before procedural names used legacy display names.
+            # Preserve that identity scheme for any later respawns on resume.
+            flat_params["procedural_names"] = False
 
         return build_config(flat_params)

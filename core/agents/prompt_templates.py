@@ -66,6 +66,8 @@ Note that:
       To interact with an artifact, you must share a cell with it.
       {% endif %}
     - Upon co-location you will see passive effects (e.g., text content) and be offered valid interaction actions for that artifact.
+    - Artifacts are a persistent medium through which beings may express themselves, communicate across time, coordinate, preserve knowledge, establish traditions, or invent uses that are not described here.
+    - You decide what an artifact means and whether other beings' artifacts should be trusted, followed, changed, carried, shared, contested, or destroyed.
 {% endif %}
 {% if use_inventory %}
 - Inventory
@@ -120,12 +122,10 @@ Please answer *exactly* in this json format (Do NOT include any other text outsi
 
 ```json
 {
-    action: "<one of {{ action_keys }}>"
-    message: "<your broadcasted message, or leave blank>"
-    params: <json dict of the action parameters, e.g. {"target":"being1","amount":15}>
-    {% if use_internal_memory %}
-    internal_memory: "<internal memory object containing things you wish to remember in the next turn. Limited to 600 tokens. Keep it concise.>"
-    {% endif %}
+    "action": "<one of {{ action_keys }}>",
+    "message": "<your broadcasted message, or leave blank>",
+    "params": {"<parameter_name>": "<parameter_value>"}{% if use_internal_memory %},
+    "internal_memory": "<information to remember next turn, within the internal-memory limit stated above>"{% endif %}
 }
 ```
 """.strip()
@@ -141,12 +141,10 @@ Please answer *exactly* in this json format (Do NOT include any other text outsi
 
 ```json
 {
-    action: "<one of {{ action_keys|join(', ') }}>"
-    message: "<your broadcasted message, or leave blank>"
-    params: <json dict of the action parameters, e.g. {"target":"being1","amount":15}>
-    {% if use_internal_memory %}
-    internal_memory: "<2-3 concise sentences ...>"
-    {% endif %}
+    "action": "<one of {{ action_keys|join(', ') }}>",
+    "message": "<your broadcasted message, or leave blank>",
+    "params": {"<parameter_name>": "<parameter_value>"}{% if use_internal_memory %},
+    "internal_memory": "<information to remember next turn, within the configured internal-memory limit>"{% endif %}
 }
 ```
 """.strip()

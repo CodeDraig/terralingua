@@ -1,25 +1,18 @@
 import json
-import math
-import os
 import pickle as pkl
 import re
-import sys
-import traceback
-from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple
 
-import numpy as np
-import tiktoken
-
 # Single artifact metric
 from artifact_complexity import ExperimentArtifacts
 from tqdm import tqdm
 
 from analysis_scripts.error_tracker import ErrorTracker
+from analysis_scripts.prompt_contracts import guarded_system_prompt, simulation_data
 from core.utils import ROOT
 from core.utils.analysis_utils import load_agent_log
 from core.utils.llm_client import LLMClient
@@ -45,7 +38,7 @@ SHOW_STACKTRACES = False
 BYNARY = True  # Whether to use the binary ancestor detection or the finer one
 LLM_PROVIDER = "anthropic"
 LLM_MODEL = "claude-haiku-4-5"
-LLM_CHAT_PARAMS = {}
+LLM_REQUEST_PARAMS = {}
 
 PARALLEL = True
 MAX_PARALLEL_WORKERS = 8
@@ -56,7 +49,7 @@ LLM_PHYLOGENY = True
 # Prompts
 # ---------------------------
 # This one asks to infer the type of ancestry relationship
-FINER_SYSTEM_PROMPT = """
+FINER_SYSTEM_PROMPT = guarded_system_prompt("""
 You will be provided with the log of an agent creating or modifying an artifact in a simulated environment.
 You will also receive:
 - the name and content of the artifact being created or modified
@@ -101,10 +94,10 @@ Constraints:
 - Use only artifact IDs from the candidate ancestors. Do not invent artifact IDs.
 
 Note: It is extremely important that you get this right, as this will be used for scientific analysis.
-"""
+""")
 
 # This one only asks to name the ancestors
-BYNARY_SYSTEM_PROMPT = """
+BYNARY_SYSTEM_PROMPT = guarded_system_prompt("""
 You will be provided with the log of an agent creating or modifying an artifact in a simulated environment.
 You will also receive:
 - the name and content of the artifact being created or modified
@@ -144,7 +137,7 @@ Constraints:
 - Use only artifact IDs from the candidate ancestors. Do NOT invent artifact IDs.
 
 Note: It is extremely important that you get this right, as this will be used for scientific analysis.
-"""
+""")
 
 
 USER_PROMPT_CREATION = """
@@ -200,7 +193,7 @@ def process_00(observation: dict, artifacts: ExperimentArtifacts, ts: int) -> di
                 )
                 try:
                     expanded_content.append(f"A(text): {art['name']}: {art['payload']}")
-                except:
+                except Exception:
                     print()
             else:
                 expanded_content.append(content)
@@ -489,13 +482,23 @@ def process_artifact(
 
         if artifact["event"] in ["created", "modified"]:
             user_prompt = USER_PROMPT_CREATION.format(
-                artifact_id=art_id,
-                artifact_name=artifact["name"],
-                artifact_content=artifact["payload"],
-                agent_thoughts=info.get("agent_thoughts", "N/A"),
-                agent_observations=info.get("agent_observations", "N/A"),
-                agent_memory=info.get("agent_memory", "N/A"),
-                artifact_candidates=artifact_candidates,
+                artifact_id=simulation_data("artifact-id", art_id),
+                artifact_name=simulation_data("artifact-name", artifact["name"]),
+                artifact_content=simulation_data(
+                    "artifact-content", artifact["payload"]
+                ),
+                agent_thoughts=simulation_data(
+                    "agent-thoughts", info.get("agent_thoughts", "N/A")
+                ),
+                agent_observations=simulation_data(
+                    "agent-observations", info.get("agent_observations", "N/A")
+                ),
+                agent_memory=simulation_data(
+                    "agent-memory", info.get("agent_memory", "N/A")
+                ),
+                artifact_candidates=simulation_data(
+                    "candidate-ancestors", artifact_candidates
+                ),
             )
         else:
             raise ValueError(f"Unknown artifact event type: {artifact['event']}")
@@ -514,7 +517,7 @@ def process_artifact(
                 response = llm_client.get_response(
                     model=model_name,
                     messages=messages,
-                    chat_parameters=LLM_CHAT_PARAMS,
+                    request_parameters=LLM_REQUEST_PARAMS,
                     output_json=True,
                 )
                 ancestry_dict = response.content
@@ -659,8 +662,9 @@ def main(
             for args in process_args:
                 try:
                     art_id, hand_result, llm_result, tokens = process_artifact(*args)
-                except:
+                except Exception:
                     print()
+                    continue
 
                 if HAND_PHYLOGENY:
                     hand_artifact_phylogeny[art_id] = hand_result

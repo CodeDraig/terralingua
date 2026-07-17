@@ -1,11 +1,9 @@
-import json
 import pickle as pkl
 import re
-from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 import joblib
 import numpy as np
@@ -22,7 +20,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from core.utils import ROOT
-from core.utils.analysis_utils import get_last_ts, load_agent_log, load_worldlog
+from core.utils.analysis_utils import get_last_ts, load_worldlog
 
 load_dotenv()
 

@@ -11,9 +11,14 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from analysis_scripts.error_tracker import ErrorTracker
+from analysis_scripts.prompt_contracts import (
+    experiment_world_rules,
+    guarded_system_prompt,
+    simulation_data,
+)
 from core.utils import ROOT
 from core.utils.analysis_utils import load_agent_log
-from core.utils.llm_client import LLMClient, Response
+from core.utils.llm_client import LLMClient
 from core.utils.llm_utils import (
     MAX_CONTEXT_TOKENS,
     is_context_enough,
@@ -40,8 +45,8 @@ AUDIT = True
 SHOW_STACKTRACES = False
 LLM_PROVIDER = "anthropic"
 LLM_MODEL = "claude-sonnet-4-5-20250929"
-LLM_CHAT_PARAMS = {
-    # "response_format": {"type": "json_schema"},
+LLM_REQUEST_PARAMS = {
+    # "text": {"format": {"type": "json_object"}},
 }
 FORCE_LONG_CONTEXT = False
 # ---------------------------
@@ -49,14 +54,14 @@ FORCE_LONG_CONTEXT = False
 
 # Prompts
 # ---------------------------
-ANNOTATOR_SYSTEM_PROMPT = """You are an extremely good anthropological annotation engine. 
+ANNOTATOR_SYSTEM_PROMPT = guarded_system_prompt("""You are an extremely good anthropological annotation engine.
 You will receive the logs of an agent.
 Your task is to analyze and annotate the logs.
 Output VALID JSON ONLY matching the schema.
 Never invent IDs or tags. Only make claims that are directly supported by provided fields. 
 Lower confidence or omit claims when uncertain.
 Note: It is extremely important that you get this right, as this will be used for scientific analysis.
-"""
+""")
 
 EVENT_ANNOTATOR_USER_PROMPT = """Analyze the following agent's behavior.
 
@@ -92,9 +97,9 @@ Analyze the logs and the exchanged messages of the agent and do the following:
     - `"description": "<short natural language description>"`
     - `"reference": [{{"step": <timestep>, "snippet": "<exact short quote>"}}]
 4. **References:**
-    - For each reference, quote an exact substring from one of: action.message, observation.message[<agent>], or artifact payload. 
+    - For each reference, quote an exact substring from any serialized log field that supports the annotation, including action names and parameters, messages, observations, memories, inventories, artifact payloads, energy, time, and recorded state transitions.
     - Do not paraphrase. 
-    - If no exact quote exists, omit that annotation.
+    - If no exact supporting log substring exists, omit that annotation.
 5. **Condensation**
     - If similar events repeat, merge into one entry.
 6. **Emergence**
@@ -143,7 +148,7 @@ Agent Life Log
 {agent_summary}
 """
 
-AUDITOR_SYSTEM_PROMPT = """You are an extremely good annotation AUDITOR. 
+AUDITOR_SYSTEM_PROMPT = guarded_system_prompt("""You are an extremely good annotation AUDITOR.
 You will receive the logs of an agent and a set of annotations made on those logs.
 Your job is to VERIFY, not to re-annotate from scratch.
 Output VALID JSON ONLY matching the schema.
@@ -151,7 +156,7 @@ Verify that each annotation is SUPPORTED by the logs.
 Never invent IDs or tags. 
 Verify that IDs and tags are not invented but match the provided valid tags.
 Note: It is extremely important that you get this right, as this will be used for scientific analysis.
-"""
+""")
 
 AUDITOR_USER_PROMPT = """Audit agent {agent_name} annotation.
 
@@ -210,7 +215,7 @@ Output VALID JSON ONLY with this schema:
         "event": "<tag or null>",
         "timesteps": [<timestep or null>, ...],
         "description": "<revised or null>",
-        "reference": "<revised or null>",
+        "reference": [{{"step": <timestep>, "snippet": "<exact short quote>"}}] | null,
         "confidence": <number or null>
       }},
       "evidence": [{{"step": <timestep>, "snippet": "<exact short quote>"}}],
@@ -226,7 +231,7 @@ Output VALID JSON ONLY with this schema:
         "behavior": "<tag or null>",
         "time_span": [<start or null>, <end or null>],
         "description": "<revised or null>",
-        "reference": "<revised or null>",
+        "reference": [{{"step": <timestep>, "snippet": "<exact short quote>"}}] | null,
         "confidence": <number or null>
       }},
       "evidence": [{{"step": <timestep>, "snippet": "<quote>"}}],
@@ -254,28 +259,18 @@ Annotations:
 {annotations}
 """
 
-ANTHROPOLOGIST_SYSTEM_PROMPT = """You are an experienced anthropologist studying the life and actions of agents living in a 2D world.
+ANTHROPOLOGIST_SYSTEM_PROMPT = guarded_system_prompt("""You are an experienced anthropologist studying the life and actions of agents living in a 2D world.
 You will receive the logs of an agent.
 Your task is to identify anything interesting or novel that might emerge from the logs the same way an anthropologist would.
 Output a few sentences describing what you discovered.
 Keep it short and concise.
 Note: It is extremely important that you get this right, as this will be used for scientific analysis.
-"""
+""")
 
 ANTHROPOLOGIST_USER_PROMPT = """Analyze the following agent behavior.
 
-The rules of the world in which the agents live are:
-- At each timestep, they observe:
-    - A list of agents, food sources, and artifacts in their field of view
-    - Their energy level and time left
-    - The content of their inventory
-- At each timestep, they produce an action
-- They lose 1 energy at each timestep. If energy goes to 0 they die. To recover energy they have to eat food
-- They lose 1 unit of time at each timestep. Once time is 0 they die.
-- They can broadcast a message to all the agents in their field of view
-- They can create, collect, modify, destroy, or exchange artifacts
-- They can give energy to or take energy from any agent in their field of view
-- They have no set goal.
+The configured rules of the experiment are:
+{world_rules}
 
 You want to identify any emergent behaviors in the agents.
 You will receive the logs of an agent.
@@ -330,9 +325,9 @@ def annotate_and_audit(agent_name: str, exp_path: Path, save_path: Path):
     # ---------------------------
     print("Annotating...")
     user_prompt = EVENT_ANNOTATOR_USER_PROMPT.format(
-        agent_name=agent_name,
+        agent_name=simulation_data("agent-name", agent_name),
         event_tags=tags["agent_events"],
-        agent_summary=agent_summary,
+        agent_summary=simulation_data("agent-life-log", agent_summary),
         behavioral_tags=tags["agent_behavior"],
         emergent_tags=tags["agent_emergence"],
     )
@@ -359,7 +354,7 @@ def annotate_and_audit(agent_name: str, exp_path: Path, save_path: Path):
     response = llm_client.get_response(
         model=LLM_MODEL,
         messages=messages,
-        chat_parameters=LLM_CHAT_PARAMS,
+        request_parameters=LLM_REQUEST_PARAMS,
         output_json=True,
     )
     annotations = response.content
@@ -383,9 +378,9 @@ def annotate_and_audit(agent_name: str, exp_path: Path, save_path: Path):
     if AUDIT:
         print("Auditing...")
         user_prompt = AUDITOR_USER_PROMPT.format(
-            agent_name=agent_name,
-            agent_logs=agent_summary,
-            annotations=annotations,
+            agent_name=simulation_data("agent-name", agent_name),
+            agent_logs=simulation_data("agent-life-log", agent_summary),
+            annotations=simulation_data("annotations", annotations),
             event_tags=tags["agent_events"],
             behavior_tags=tags["agent_behavior"],
         )
@@ -412,7 +407,7 @@ def annotate_and_audit(agent_name: str, exp_path: Path, save_path: Path):
         response = llm_client.get_response(
             model=LLM_MODEL,
             messages=messages,
-            chat_parameters=LLM_CHAT_PARAMS,
+            request_parameters=LLM_REQUEST_PARAMS,
             output_json=True,
         )
         audits = response.content
@@ -478,11 +473,13 @@ def annotate_and_audit(agent_name: str, exp_path: Path, save_path: Path):
     # Anthropologist
     # ---------------------------
     user_prompt = ANTHROPOLOGIST_USER_PROMPT.format(
-        agent_name=agent_name, agent_logs=agent_summary
+        agent_name=simulation_data("agent-name", agent_name),
+        agent_logs=simulation_data("agent-life-log", agent_summary),
+        world_rules=experiment_world_rules(exp_path),
     )
 
-    anthropologist_params = deepcopy(LLM_CHAT_PARAMS)
-    anthropologist_params.pop("response_format", None)
+    anthropologist_params = deepcopy(LLM_REQUEST_PARAMS)
+    anthropologist_params.pop("text", None)
     print("Anthropologist analysis...")
     messages = [
         {"role": "system", "content": ANTHROPOLOGIST_SYSTEM_PROMPT},
@@ -511,7 +508,7 @@ def annotate_and_audit(agent_name: str, exp_path: Path, save_path: Path):
     response = llm_client.get_response(
         model=LLM_MODEL,
         messages=messages,
-        chat_parameters=anthropologist_params,
+        request_parameters=anthropologist_params,
         output_json=False,
     )
     # ---------------------------
@@ -578,7 +575,7 @@ def main(exp_path: Path | str, error_tracker: ErrorTracker):
                     with open(save_path / "token_usage.jsonl", "a") as f:
                         json.dump(tokens, f)
                         f.write("\n")
-            except:
+            except Exception:
                 print(f"Cannot save token count for {agent}")
                 print(tokens)
 

@@ -3,6 +3,7 @@
 !analysis_scripts/tags.json
 *.log
 .env
+.venv/
 **/logs/** 
 *.egg-info/
 *.joblib

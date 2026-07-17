@@ -14,6 +14,7 @@ python main.py \
     --exogenous_motivation  "creative" \
     --genome                "ocean_5" \
     --max_history           1 \
+    --no-procedural_names \
     \
     `# Environment` \
     --grid_size             50 \

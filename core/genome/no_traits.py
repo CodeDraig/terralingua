@@ -1,5 +1,5 @@
 import copy
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import dataclass
 
 from core.genome.base_genome import Genome as BaseGenome
 

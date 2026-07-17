@@ -4,7 +4,6 @@ import json
 import pickle
 from collections import defaultdict
 from copy import deepcopy
-from itertools import chain
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
@@ -350,7 +349,7 @@ class OpenGridWorld:
             if action_name == "move":
                 try:
                     move = MOVE_DICT.get(action_params.get("direction", "stay"), (0, 0))
-                except:
+                except Exception:
                     move = (0, 0)
             # ---------------------------
 
@@ -467,7 +466,7 @@ class OpenGridWorld:
                     )
                     # Give additional energy
                     additional_energy = min(
-                        int(action_params.get("energy", 0)),
+                        max(int(action_params.get("energy", 0)), 0),
                         self.agent_energy[agent],
                     )
 
@@ -1260,7 +1259,6 @@ class OpenGridWorld:
         for dx in range(-r, r + 1):
             for dy in range(-r, r + 1):
                 gx, gy = self.wrap_xy(x + dx, y + dy)
-                obs_x, obs_y = dx + r, dy + r
                 rel_pos = (dx, dy)
 
                 if 0 <= gx < self.grid_size and 0 <= gy < self.grid_size:
@@ -1464,9 +1462,7 @@ class OpenGridWorld:
             self._seen_msgs.add(self.step_count)
 
         # --- Common draw config ---
-        line_height = 18
         x_margin = 10
-        y_start = 30
         max_width = self._sidebar_width - 2 * x_margin
 
         wrapped_lines = []

@@ -1,6 +1,6 @@
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from collections import defaultdict
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, Set, Tuple
 
 import numpy as np
 import tiktoken
@@ -76,7 +76,12 @@ class Artifact:
     def deserialize(cls, data: dict):
         name = data["name"]
         payload = data["payload"]
-        lifespan = np.inf if data["lifespan"] == "inf" else int(data["lifespan"])
+        serialized_lifespan = data["lifespan"]
+        lifespan = (
+            np.inf
+            if serialized_lifespan == "inf" or int(serialized_lifespan) == -1
+            else int(serialized_lifespan)
+        )
         pose = (data["pose"][0], data["pose"][1])
         creator = data["creator_tag"]
         users = defaultdict(set)
@@ -86,8 +91,12 @@ class Artifact:
         if "deletion_time" in data:
             deletion_time = data["deletion_time"]
         else:
+            serialized_remaining_time = data["remaining_time"]
             remaining_time = (
-                np.inf if data["remaining_time"] == "inf" else data["remaining_time"]
+                np.inf
+                if serialized_remaining_time == "inf"
+                or int(serialized_remaining_time) == -1
+                else int(serialized_remaining_time)
             )
         past_versions = data.get("past_versions", [])
         version = data.get("version", 0)
@@ -186,6 +195,25 @@ class TextArtifact(Artifact):
             if not valid:
                 return f"Failed to modify artifact {self.name}: {error_message}"
 
+            lifespan = self.lifespan
+            remaining_time = self.remaining_time
+            if "lifespan" in params:
+                try:
+                    lifespan = int(params["lifespan"])
+                except (TypeError, ValueError):
+                    return (
+                        f"Failed to modify artifact {self.name}: "
+                        "lifespan must be an integer greater than 0, or -1"
+                    )
+                if lifespan == -1:
+                    lifespan = np.inf
+                elif lifespan <= 0:
+                    return (
+                        f"Failed to modify artifact {self.name}: "
+                        "lifespan must be an integer greater than 0, or -1"
+                    )
+                remaining_time = lifespan
+
             # Do not change the name. This ensure uniqueness of the artifacts
             past_version = {
                 "payload": self.payload,
@@ -199,8 +227,8 @@ class TextArtifact(Artifact):
             self.version += 1
             self.version_creation_time = timestamp
             self.payload = params.get("payload", "")
-            self.lifespan = params.get("lifespan", self.lifespan)
-            self.remaining_time = np.inf if self.lifespan == -1 else self.lifespan
+            self.lifespan = lifespan
+            self.remaining_time = remaining_time
             return f"Artifact {self.name} updated"
         if action == f"destroy_artifact_{self.name}":
             self.remaining_time = 0
@@ -208,7 +236,6 @@ class TextArtifact(Artifact):
         return ""
 
     def verify_payload(self, payload) -> Tuple[bool, str]:
-        payload = str(payload)
         if not isinstance(payload, str):
             return False, "Payload must be a string for TextArtifact"
         token_count = len(self.payload_encoder.encode(payload))

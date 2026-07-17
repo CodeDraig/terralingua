@@ -1,9 +1,6 @@
 import copy
-import glob
 import json
 import os
-import re
-import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from functools import partial
@@ -11,12 +8,16 @@ from pathlib import Path
 from pprint import pprint
 from typing import Dict, List, Set, Tuple
 
-import numpy as np
 from dotenv import load_dotenv
 from graph_utils import build_graph, get_slpa_communities
 from tqdm import tqdm
 
 from analysis_scripts.error_tracker import ErrorTracker
+from analysis_scripts.prompt_contracts import (
+    experiment_world_rules,
+    guarded_system_prompt,
+    simulation_data,
+)
 from core.utils import ROOT
 from core.utils.analysis_utils import load_agent_log
 from core.utils.llm_client import LLMClient
@@ -48,22 +49,22 @@ AGENT_PREFIX = "being"
 PERFORM_AUDIT = True
 LLM_PROVIDER = "anthropic"
 LLM_MODEL = "claude-sonnet-4-5-20250929"
-LLM_CHAT_PARAMS = {
-    # "response_format": {"type": "json_object"},
+LLM_REQUEST_PARAMS = {
+    # "text": {"format": {"type": "json_object"}},
 }
 FORCE_LONG_CONTEXT = False
 # ---------------------------
 
 # Prompts
 # ---------------------------
-ANNOTATOR_SYSTEM_PROMPT = """You are an extremely good anthropological annotation engine. 
+ANNOTATOR_SYSTEM_PROMPT = guarded_system_prompt("""You are an extremely good anthropological annotation engine.
 You will receive the logs of a group of agents.
 Your task is to analyze and annotate the logs.
 Output VALID JSON ONLY matching the schema.
 Never invent IDs or tags. Only make claims that are directly supported by provided fields. 
 Lower confidence or omit claims when uncertain.
 Note: It is extremely important that you get this right, as this will be used for scientific analysis.
-"""
+""")
 
 EVENT_ANNOTATOR_USER_PROMPT = """Analyze the following group behavior.
 The group logs are structured as {{timestep0: [agent1_log, agent2_log, ...], timestep1: [agent0_log, agent2_log, ...], ...}}.
@@ -143,7 +144,8 @@ Output must be **VALID JSON ONLY**, following exactly this schema:
       "timesteps": [<t1>, <t2>, ...],
       "confidence": <confidence_value>,
       "description": "<short_description>",
-      "reference": [{{"step": <timestep>, "snippet": "<exact short quote>"}}]
+      "reference": [{{"step": <timestep>, "snippet": "<exact short quote>"}}],
+      "agents": ["<agent_tag>", ...]
     }}
   ],
   "behaviors": [
@@ -152,7 +154,8 @@ Output must be **VALID JSON ONLY**, following exactly this schema:
       "time_span": [<start_time>, <end_time>],
       "confidence": <confidence_value>,
       "description": "<short_description>",
-      "reference": [{{"step": <timestep>, "snippet": "<exact short quote>"}}]
+      "reference": [{{"step": <timestep>, "snippet": "<exact short quote>"}}],
+      "agents": ["<agent_tag>", ...]
     }}
   ],
   "comment": "<short recap>",
@@ -179,7 +182,7 @@ Group Log
 {community_data}
 """
 
-AUDITOR_SYSTEM_PROMPT = """You are an extremely good annotation AUDITOR.
+AUDITOR_SYSTEM_PROMPT = guarded_system_prompt("""You are an extremely good annotation AUDITOR.
 You will receive the logs of a group of agents and a set of annotations made on those logs.
 Your job is to VERIFY, not to re-annotate from scratch.
 Output VALID JSON ONLY matching the schema.
@@ -187,7 +190,7 @@ Verify that each annotation is SUPPORTED by the logs.
 Never invent IDs or tags. 
 Verify that IDs and tags are not invented but match the provided valid tags.
 Note: It is extremely important that you get this right, as this will be used for scientific analysis.
-"""
+""")
 
 AUDITOR_USER_PROMPT = """Audit the following group annotations.
 
@@ -203,8 +206,8 @@ Each agent log contains:
 - Observation containing: messages received from other agents, agent remaining time and energy, agent's inventory
 
 B) An annotation with:
-   - "events": [{{"event", "timesteps", "confidence", "description", "reference"}}, ...]
-   - "behaviors": [{{"behavior", "time_span", "confidence", "description", "reference"}}, ...]
+   - "events": [{{"event", "timesteps", "confidence", "description", "reference", "agents"}}, ...]
+   - "behaviors": [{{"behavior", "time_span", "confidence", "description", "reference", "agents"}}, ...]
    - "comment": string
 
 Note: 
@@ -246,7 +249,8 @@ Output VALID JSON ONLY with this schema:
         "event": "<tag or null>",
         "timesteps": [<timestep or null>, ...],
         "description": "<revised or null>",
-        "reference": "<revised or null>",
+        "reference": [{{"step": <timestep>, "snippet": "<exact short quote>"}}] | null,
+        "agents": ["<agent_tag>", ...] | null,
         "confidence": <number or null>
       }},
       "evidence": [{{"step": <timestep>, "snippet": "<exact short quote>"}}],
@@ -262,7 +266,8 @@ Output VALID JSON ONLY with this schema:
         "behavior": "<tag or null>",
         "time_span": [<start or null>, <end or null>],
         "description": "<revised or null>",
-        "reference": "<revised or null>",
+        "reference": [{{"step": <timestep>, "snippet": "<exact short quote>"}}] | null,
+        "agents": ["<agent_tag>", ...] | null,
         "confidence": <number or null>
       }},
       "evidence": [{{"step": <timestep>, "snippet": "<quote>"}}],
@@ -296,28 +301,18 @@ Annotations:
 {annotations}
 """
 
-ANTHROPOLOGIST_SYSTEM_PROMPT = """You are an experienced anthropologist studying the life and actions of agents living in a 2D world.
+ANTHROPOLOGIST_SYSTEM_PROMPT = guarded_system_prompt("""You are an experienced anthropologist studying the life and actions of agents living in a 2D world.
 You will receive the logs of a group of agents.
 Your task is to identify anything interesting or novel that might emerge from the logs the same way an anthropologist would.
 Output a few sentences describing what you discovered.
 Keep it short and concise.
 Note: It is extremely important that you get this right, as this will be used for scientific analysis.
-"""
+""")
 
 ANTHROPOLOGIST_USER_PROMPT = """Analyze the following group behavior.
 
-The rules of the world in which the agents live are:
-- At each timestep, they observe:
-    - A list of agents, food sources, and artifacts in their field of view
-    - Their energy level and time left
-    - The content of their inventory
-- At each timestep, they produce an action
-- They lose 1 energy at each timestep. If energy goes to 0 they die. To recover energy they have to eat food
-- They lose 1 unit of time at each timestep. Once time is 0 they die.
-- They can broadcast a message to all the agents in their field of view
-- They can create, collect, modify, destroy, or exchange artifacts
-- They can give energy to or take energy from any agent in their field of view
-- They have no set goal.
+The configured rules of the experiment are:
+{world_rules}
 
 You want to identify any emergent behaviors in the agents.
 You will receive the logs of a group of agents.
@@ -382,9 +377,9 @@ def build_annotator_messages(tags, community, community_data, agent_names):
         event_tags=tags["group_events"],
         behavioral_tags=tags["group_behavior"],
         emergent_tags=tags["group_emergence"],
-        community_tags=community,
-        community_data=community_data,
-        agent_names=agent_names,
+        community_tags=simulation_data("community-agent-tags", community),
+        community_data=simulation_data("group-log", community_data),
+        agent_names=simulation_data("agent-tag-name-map", agent_names),
     )
     return [
         {"role": "system", "content": ANNOTATOR_SYSTEM_PROMPT},
@@ -494,9 +489,9 @@ def merge_notes(notes_list: List[str], total_tokens) -> Tuple[str, dict]:
 
     # Prompts for merging comments
     # ---------------------------
-    system_prompt = """You are an expert at merging and condensing anthropological notes.
+    system_prompt = guarded_system_prompt("""You are an expert at merging and condensing anthropological notes.
 You are given multiple notes of the same group of agents over different time intervals.
-Your task is to merge them into a single coherent note."""
+Your task is to merge them into a single coherent note.""")
 
     user_prompt = """Here are the notes to merge:
     {comments}
@@ -510,17 +505,19 @@ Your task is to merge them into a single coherent note."""
     for i in range(len(notes_list)):
         numbered_notes += f"Note {i + 1}:\n{notes_list[i]}\n\n"
 
-    whole_note_prompt = user_prompt.format(comments=numbered_notes)
+    whole_note_prompt = user_prompt.format(
+        comments=simulation_data("anthropological-notes", numbered_notes)
+    )
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": whole_note_prompt},
     ]
-    chat_params = copy.deepcopy(LLM_CHAT_PARAMS)
-    chat_params.pop("response_format", None)
+    request_params = copy.deepcopy(LLM_REQUEST_PARAMS)
+    request_params.pop("text", None)
     response = llm_client.get_response(
         model=LLM_MODEL,
         messages=messages,
-        chat_parameters=chat_params,
+        request_parameters=request_params,
         output_json=False,
     )
     merged_note = response.content
@@ -567,8 +564,7 @@ def merge_annotations(annotations_list: List[dict], total_tokens) -> Tuple[dict,
         emergence = ann.get("emergence", {})
         keywords = emergence.get("keywords", [])
         merged["emergence"]["keywords"].update(keywords)
-        comments = emergence.get("comment", [])
-        merged["emergence"]["comment"].extend(comments)
+        merged["emergence"]["comment"].append(emergence.get("comment", "none"))
 
         comment = ann.get("comment", "")
         merged["comment"].append(comment)
@@ -640,7 +636,7 @@ def annotate_and_audit(
         response = llm_client.get_response(
             model=LLM_MODEL,
             messages=messages,
-            chat_parameters=LLM_CHAT_PARAMS,
+            request_parameters=LLM_REQUEST_PARAMS,
             output_json=True,
         )
         raw_ann_chunk = response.content
@@ -660,10 +656,10 @@ def annotate_and_audit(
             audited_ann_chunk = deepcopy(raw_ann_chunk)
 
             auditor_user_prompt = AUDITOR_USER_PROMPT.format(
-                community_tags=community,
-                agent_names=agent_names,
-                community_data=data_chunk,
-                annotations=raw_ann_chunk,
+                community_tags=simulation_data("community-agent-tags", community),
+                agent_names=simulation_data("agent-tag-name-map", agent_names),
+                community_data=simulation_data("group-log", data_chunk),
+                annotations=simulation_data("annotations", raw_ann_chunk),
                 event_tags=tags["group_events"],
                 behavior_tags=tags["group_behavior"],
             )
@@ -675,7 +671,7 @@ def annotate_and_audit(
             response = llm_client.get_response(
                 model=LLM_MODEL,
                 messages=auditor_messages,
-                chat_parameters=LLM_CHAT_PARAMS,
+                request_parameters=LLM_REQUEST_PARAMS,
                 output_json=True,
             )
             audits_chunk = response.content
@@ -740,9 +736,10 @@ def annotate_and_audit(
         # Anthropologist
         # ---------------------------
         anthropologist_user_prompt = ANTHROPOLOGIST_USER_PROMPT.format(
-            community_tags=community,
-            community_data=data_chunk,
-            agent_names=agent_names,
+            community_tags=simulation_data("community-agent-tags", community),
+            community_data=simulation_data("group-log", data_chunk),
+            agent_names=simulation_data("agent-tag-name-map", agent_names),
+            world_rules=experiment_world_rules(exp_path),
         )
 
         anthropologist_messages = [
@@ -750,13 +747,13 @@ def annotate_and_audit(
             {"role": "user", "content": anthropologist_user_prompt},
         ]
 
-        anthropologist_params = deepcopy(LLM_CHAT_PARAMS)
-        anthropologist_params.pop("response_format", None)
+        anthropologist_params = deepcopy(LLM_REQUEST_PARAMS)
+        anthropologist_params.pop("text", None)
         print("Anthropologist analysis...")
         response = llm_client.get_response(
             model=LLM_MODEL,
             messages=anthropologist_messages,
-            chat_parameters=anthropologist_params,
+            request_parameters=anthropologist_params,
             output_json=False,
         )
         anth_chunk_response = response.content
@@ -870,7 +867,7 @@ def main(exp_path: Path | str, error_tracker: ErrorTracker):
                     with open(save_path / "token_counts.jsonl", "a") as f:
                         json.dump(tokens, f)
                         f.write("\n")
-            except:
+            except Exception:
                 print(f"Cannot save token count for community {comm_idx}")
                 print(tokens)
 

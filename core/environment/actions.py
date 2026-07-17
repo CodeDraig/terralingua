@@ -1,6 +1,6 @@
 """Action templates for OpenGridWorld."""
 
-from core.environment.artifact import ARTIFACT_TYPE
+from core.environment.artifact import MAX_TEXT_ARTIFACT_SIZE
 
 ACTION_TEXT = {
     "move": {
@@ -32,8 +32,19 @@ ACTION_TEXT = {
         "description": "Creates a new artifact at the being's location.",
         "params": {
             "name": "The name of the artifact (use **unique** names)",
-            "type": f"Type of the artifact to create. One among: {list(ARTIFACT_TYPE.keys())}",
-            "payload": f"Content of the artifact (e.g. a message, a code snippet, etc.). It depends on the artifact type: {ARTIFACT_TYPE}",
+            "type": (
+                "Must be exactly 'text'. A text artifact is a persistent physical "
+                "object that beings can use to create, preserve, and transmit culture."
+            ),
+            "payload": (
+                "Text stored in the artifact and readable by beings that share its "
+                "cell or possess it. Use it however you choose: record discoveries, "
+                "communicate claims or agreements, tell stories, create symbols, "
+                "establish customs, leave warnings, make maps, issue challenges, "
+                "preserve memories, or invent entirely new cultural forms. These "
+                "examples are not limits. The text does not execute or directly "
+                f"change the environment. Maximum {MAX_TEXT_ARTIFACT_SIZE} tokens."
+            ),
             "lifespan": "How many time steps the artifact will last (in number of steps, integer > 0. If -1 the artifact will never disappear)",
         },
     },
