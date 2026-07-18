@@ -50,7 +50,12 @@ cp .env.example .env
 Run directly with `main.py` using CLI flags:
 
 ```bash
-python main.py --exp_name my_experiment --init_agents 10 --max_ts 200 --model claude-haiku-4-5
+python main.py \
+  --provider anthropic \
+  --model claude-haiku-4-5 \
+  --exp_name my_experiment \
+  --init_agents 10 \
+  --max_ts 200
 ```
 
 Or use `run_experiment.sh`, an annotated template covering the common options:
@@ -67,18 +72,22 @@ default naming seed is `0`; use another integer to create a different
 reproducible roster:
 
 ```bash
-python main.py --name_seed 1729
+python main.py --provider anthropic --name_seed 1729
 ```
 
 Because names are visible to agents, treat the seed as part of the experimental
 condition. Pass `--no-procedural_names` to use legacy `being0`, `being1`, …
 display names.
 
-### Reproducing paper experiments
+### Paper experiment configurations
 
-The `paper_experiment_scripts/` folder contains the exact scripts used to run each experiment from the paper. All scripts must be run from the project root:
+The `paper_experiment_scripts/` folder retains the environmental configurations
+used for the paper experiments while using the current exact-model-ID transport.
+Run scripts from the project root after pointing `OPENAI_BASE_URL` at the model
+server:
 
 ```bash
+export OPENAI_BASE_URL=http://127.0.0.1:9000/v1
 bash paper_experiment_scripts/run_core.sh
 ```
 
@@ -90,48 +99,47 @@ Run the local unit suite from the project root:
 python -m unittest discover -v
 ```
 
-## Supported Agent Models
+## Model configuration
 
-OpenAI models use the OpenAI **Responses API** exclusively. Requests are
-stateless (`store=false`); TerraLingua retains the agent history and checkpoints
-locally.
-
-Pass any of the following keys via `--model`:
-
-| Key | Provider | Notes |
-|---|---|---|
-| `claude-haiku-4-5` | Anthropic | Fast, cost-effective |
-| `claude-sonnet-4-6` | Anthropic | Default |
-| `o4-mini` | OpenAI | |
-| `o3-mini` | OpenAI | |
-| `gpt-5.1` | OpenAI | |
-| `gpt-5-mini` | OpenAI | |
-| `gpt-5-nano` | OpenAI | |
-| `gpt-5.4-nano` | OpenAI | |
-| `QWEN2.5` | Local (vLLM) | Qwen2.5-32B-Instruct |
-| `QWEN3` | Local (vLLM) | Qwen3-32B |
-| `DeepSeek-R1-32` | Local (vLLM) | DeepSeek-R1-Distill-Qwen-32B |
-| `DeepSeek-R1-70` | Local (vLLM) | DeepSeek-R1-Distill-Llama-70B |
+TerraLingua has no model registry or aliases. Pass the exact server-side model
+ID with `--model` and select its API with `--provider openai` or
+`--provider anthropic`. The provider is required for new runs; resumed runs
+recover it from their saved parameters. Checkpoints created before provider
+metadata was recorded cannot be resumed.
 
 ### Local models (vLLM)
 
 Local models require a running [vLLM](https://github.com/vllm-project/vllm)
 server that exposes an OpenAI Responses-compatible `/v1/responses` endpoint.
 TerraLingua does not fall back to `/v1/chat/completions`; servers that only
-implement Chat Completions must be upgraded or reconfigured. Start one (or
-more) on any of the default ports (`9000–9003`, `9010–9012`):
+implement Chat Completions must be upgraded or reconfigured:
 
 ```bash
 vllm serve Qwen/Qwen3-32B --port 9000
+python main.py \
+  --provider openai \
+  --model Qwen/Qwen3-32B \
+  --openai_base_url http://127.0.0.1:9000/v1
 ```
 
-Then pass the ports via `--ports` (defaults to `9000 9001 9002 9003 9010 9011 9012`):
+### Custom OpenAI-compatible endpoints
+
+OpenAI models and compatible servers use the **Responses API** exclusively.
+Requests are stateless (`store=false`); TerraLingua retains agent history and
+checkpoints locally. Supply the server's `/v1` base URL:
 
 ```bash
-python main.py --model QWEN3 --ports 9000 9001
+python main.py \
+  --provider openai \
+  --model vendor/strange-model \
+  --openai_base_url http://127.0.0.1:8080/v1
 ```
 
-TerraLingua will auto-discover which ports are hosting the requested model and load-balance across them.
+Set `OPENAI_API_KEY` in `.env` to the credential expected by the server. The
+base URL can instead be set with `OPENAI_BASE_URL`. API keys remain
+environment-only and are not written to experiment parameters or checkpoints.
+Custom endpoints must expose `/v1/responses`; Chat Completions-only endpoints
+are not supported.
 
 ## Data Analysis
 

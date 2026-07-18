@@ -13,7 +13,11 @@ from core.genome.rpg_6 import Genome
 
 class RPG6GenomeTests(unittest.TestCase):
     def test_c1_cli_and_runner_accept_rpg_6(self):
-        with mock.patch.object(sys, "argv", ["main.py", "--genome", "rpg_6"]):
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["main.py", "--provider", "anthropic", "--genome", "rpg_6"],
+        ):
             config = config_module.build_config(cli_module.parse_args())
 
         runner = object.__new__(runner_module.SimulationRunner)

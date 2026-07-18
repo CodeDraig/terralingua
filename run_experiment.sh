@@ -7,6 +7,7 @@ args=(
     --max_ts 300
 
     # Agent LLM
+    --provider "anthropic"
     --model "claude-haiku-4-5"
 
     # Agents

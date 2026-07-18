@@ -1,9 +1,11 @@
 import importlib
+import io
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +49,7 @@ bash run_experiment.sh
 
         arguments = result.stdout.splitlines()
         self.assertEqual(arguments[0], "<main.py>")
+        self.assertIn("<--provider>", arguments)
         self.assertIn("<--internal_memory_size>", arguments)
         self.assertIn("<--name_seed>", arguments)
         self.assertIn("<--reproduction_cost>", arguments)
@@ -55,7 +58,14 @@ bash run_experiment.sh
     def test_paper_launchers_pin_legacy_display_names(self):
         for script in (ROOT / "paper_experiment_scripts").glob("*.sh"):
             with self.subTest(script=script.name):
-                self.assertIn("--no-procedural_names", script.read_text())
+                source = script.read_text()
+                self.assertIn("--no-procedural_names", source)
+                self.assertIn('--provider              "openai"', source)
+                self.assertIn(
+                    '"deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"',
+                    source,
+                )
+                self.assertNotIn('"DeepSeek-R1-32"', source)
 
 
 class RunnerConfigurationTests(unittest.TestCase):
@@ -69,18 +79,69 @@ class RunnerConfigurationTests(unittest.TestCase):
         with mock.patch.object(
             sys,
             "argv",
-            ["main.py", "--name_seed", "1729", "--no-procedural_names"],
+            [
+                "main.py",
+                "--provider",
+                "anthropic",
+                "--name_seed",
+                "1729",
+                "--no-procedural_names",
+            ],
         ):
             config = config_module.build_config(cli_module.parse_args())
 
         self.assertFalse(config.agent.procedural_names)
         self.assertEqual(config.agent.name_seed, 1729)
 
+    def test_cli_requires_provider_for_new_runs_but_not_resume(self):
+        with (
+            mock.patch.object(sys, "argv", ["main.py"]),
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            cli_module.parse_args()
+
+        with mock.patch.object(sys, "argv", ["main.py", "--resume"]):
+            args = cli_module.parse_args()
+
+        self.assertTrue(args.resume)
+        self.assertFalse(hasattr(args, "provider"))
+
+    def test_cli_accepts_arbitrary_openai_endpoint_configuration(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--provider",
+                "openai",
+                "--model",
+                "vendor/strange-model",
+                "--openai_base_url",
+                "http://127.0.0.1:8080/v1",
+            ],
+        ):
+            config = config_module.build_config(cli_module.parse_args())
+
+        self.assertEqual(config.agent.provider, "openai")
+        self.assertEqual(config.agent.model, "vendor/strange-model")
+        self.assertEqual(
+            config.agent.openai_base_url,
+            "http://127.0.0.1:8080/v1",
+        )
+        self.assertNotIn("api_key", str(config.to_json()).lower())
+
     def test_legacy_checkpoint_parameters_preserve_legacy_names(self):
         with tempfile.TemporaryDirectory() as log_dir:
             params_path = Path(log_dir) / "params.json"
             params_path.write_text(
-                '{"agent": {"model": "test"}, "env": {}, "run": {}}'
+                """
+                {
+                  "agent": {"model": "test", "provider": "anthropic"},
+                  "env": {},
+                  "run": {}
+                }
+                """
             )
 
             config = checkpoint_module.CheckpointManager(
@@ -88,6 +149,75 @@ class RunnerConfigurationTests(unittest.TestCase):
             ).update_parameters()
 
         self.assertFalse(config.agent.procedural_names)
+
+    def test_checkpoint_without_provider_is_rejected(self):
+        with tempfile.TemporaryDirectory() as log_dir:
+            params_path = Path(log_dir) / "params.json"
+            params_path.write_text(
+                '{"agent": {"model": "test"}, "env": {}, "run": {}}'
+            )
+
+            with self.assertRaisesRegex(ValueError, "cannot be resumed"):
+                checkpoint_module.CheckpointManager(
+                    Path(log_dir)
+                ).update_parameters()
+
+    def test_checkpoint_parameters_preserve_custom_openai_endpoint(self):
+        with tempfile.TemporaryDirectory() as log_dir:
+            params_path = Path(log_dir) / "params.json"
+            params_path.write_text(
+                """
+                {
+                  "agent": {
+                    "model": "vendor/strange-model",
+                    "provider": "openai",
+                    "openai_base_url": "http://127.0.0.1:8080/v1"
+                  },
+                  "env": {},
+                  "run": {}
+                }
+                """
+            )
+
+            config = checkpoint_module.CheckpointManager(
+                Path(log_dir)
+            ).update_parameters()
+
+        self.assertEqual(config.agent.provider, "openai")
+        self.assertEqual(config.agent.model, "vendor/strange-model")
+        self.assertEqual(
+            config.agent.openai_base_url,
+            "http://127.0.0.1:8080/v1",
+        )
+
+    def test_runner_forwards_custom_openai_configuration_to_router(self):
+        with tempfile.TemporaryDirectory() as save_root:
+            params = ExperimentConfig(
+                agent=AgentConfig(
+                    model="vendor/strange-model",
+                    provider="openai",
+                    openai_base_url="http://127.0.0.1:8080/v1",
+                ),
+                env=EnvConfig(init_agents=0),
+                run=RunConfig(
+                    exp_name="custom_endpoint",
+                    max_parallel_workers=3,
+                    save_root=save_root,
+                ),
+            )
+
+            with (
+                mock.patch.object(runner_module.SimulationRunner, "_init_state"),
+                mock.patch.object(runner_module, "LLMRouter") as router,
+            ):
+                runner_module.SimulationRunner(params=params)
+
+        router.assert_called_once_with(
+            model="vendor/strange-model",
+            instances=3,
+            provider="openai",
+            openai_base_url="http://127.0.0.1:8080/v1",
+        )
 
     def test_incomplete_checkpoint_outputs_are_rebuilt(self):
         runner = object.__new__(runner_module.SimulationRunner)

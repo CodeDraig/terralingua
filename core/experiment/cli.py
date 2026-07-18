@@ -100,6 +100,8 @@ def parse_args():
     )
 
     args = parser.parse_args()
+    if not args.resume and not hasattr(args, "provider"):
+        parser.error("--provider is required for new runs")
 
     # Auto-coercion pass
     args_dict = vars(args)

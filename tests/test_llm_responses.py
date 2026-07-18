@@ -297,66 +297,86 @@ class ResponsesTransportTests(unittest.TestCase):
 
 
 class ResponsesRouterTests(unittest.TestCase):
-    def test_openai_router_uses_responses_parameter_shapes(self):
-        router = object.__new__(llm_router.LLMRouter)
-        router.model_name = "gpt-5.1"
-
+    def test_openai_router_passes_exact_model_id_to_custom_endpoint(self):
         with mock.patch.object(
             llm_router, "AgentClient", return_value=mock.sentinel.client
-        ):
-            client, params = router._build_remote_client()
+        ) as factory:
+            router = llm_router.LLMRouter(
+                model="vendor/strange-model",
+                instances=1,
+                provider="openai",
+                openai_base_url="http://127.0.0.1:8080/v1",
+            )
 
+        factory.assert_called_once_with(
+            provider="openai",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        client, params = router.next()
         self.assertIs(client, mock.sentinel.client)
         self.assertEqual(
             params,
             {
-                "model": "gpt-5.1",
+                "model": "vendor/strange-model",
                 "text": {"format": {"type": "json_object"}},
-                "reasoning": {"effort": "low"},
             },
         )
 
-    def test_openai_small_models_use_low_reasoning_and_json_output(self):
-        for model_name in ("gpt-5-nano", "gpt-5.4-nano", "gpt-5.4-mini"):
-            with self.subTest(model=model_name):
-                self.assertEqual(llm_router.MODEL_MAP[model_name], model_name)
-                router = object.__new__(llm_router.LLMRouter)
-                router.model_name = model_name
-
-                with mock.patch.object(
-                    llm_router, "AgentClient", return_value=mock.sentinel.client
-                ):
-                    client, params = router._build_remote_client()
-
-                self.assertIs(client, mock.sentinel.client)
-                self.assertEqual(
-                    params,
-                    {
-                        "model": model_name,
-                        "text": {"format": {"type": "json_object"}},
-                        "reasoning": {"effort": "low"},
-                    },
-                )
-
-    def test_local_router_uses_responses_output_limit_and_format(self):
-        router = object.__new__(llm_router.LLMRouter)
-        router.model_name = llm_router.MODEL_MAP["QWEN3"]
-
+    def test_openai_router_does_not_attach_model_specific_options(self):
         with mock.patch.object(
             llm_router, "AgentClient", return_value=mock.sentinel.client
         ):
-            client, params = router._build_local_client(9000)
+            router = llm_router.LLMRouter(
+                model="gpt-5.4-mini",
+                instances=1,
+                provider="openai",
+            )
 
+        client, params = router.next()
         self.assertIs(client, mock.sentinel.client)
         self.assertEqual(
             params,
             {
-                "model": "Qwen/Qwen3-32B",
+                "model": "gpt-5.4-mini",
                 "text": {"format": {"type": "json_object"}},
-                "temperature": 1,
-                "max_output_tokens": 256,
             },
         )
+
+    def test_anthropic_router_passes_exact_model_id(self):
+        with mock.patch.object(
+            llm_router, "AgentClient", return_value=mock.sentinel.client
+        ) as factory:
+            router = llm_router.LLMRouter(
+                model="vendor/anthropic-model",
+                instances=1,
+                provider="anthropic",
+            )
+
+        factory.assert_called_once_with(provider="anthropic")
+        client, params = router.next()
+        self.assertIs(client, mock.sentinel.client)
+        self.assertEqual(
+            params,
+            {
+                "model": "vendor/anthropic-model",
+                "max_output_tokens": 4096,
+            },
+        )
+
+    def test_router_rejects_unknown_provider_and_empty_model(self):
+        with self.assertRaisesRegex(ValueError, "Unknown provider"):
+            llm_router.LLMRouter(
+                model="vendor/model",
+                instances=1,
+                provider="local",
+            )
+
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            llm_router.LLMRouter(
+                model="  ",
+                instances=1,
+                provider="openai",
+            )
 
 
 if __name__ == "__main__":

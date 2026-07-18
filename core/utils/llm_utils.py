@@ -78,7 +78,7 @@ def select_with_retry(
             )
             time.sleep(wait_time)
         except requests.exceptions.RequestException as e:
-            # Indicate connection error. Rescan ports
+            # Indicate a connection error so the configured clients are rebuilt.
             print(f"⚠️ Connection error {agent.agent_name}({agent.agent_tag}): {e}")
             agent.max_history = original_history_len
             traceback.print_exc()

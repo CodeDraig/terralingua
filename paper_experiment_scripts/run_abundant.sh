@@ -8,7 +8,8 @@ python main.py \
     --max_ts                3000 \
     \
     `# Agent LLM` \
-    --model                 "DeepSeek-R1-32" \
+    --provider              "openai" \
+    --model                 "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B" \
     \
     `# Agents` \
     --exogenous_motivation  "base" \

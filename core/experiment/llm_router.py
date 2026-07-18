@@ -1,160 +1,50 @@
 from itertools import cycle
-from typing import Tuple
-
-import requests
 
 from core.utils.llm_client import AgentClient
-
-MODEL_MAP = {
-    "o4-mini": "o4-mini",
-    "o3-mini": "o3-mini",
-    "gpt-5.1": "gpt-5.1",
-    "gpt-5-mini": "gpt-5-mini",
-    "gpt-5-nano": "gpt-5-nano",
-    "gpt-5.4-nano": "gpt-5.4-nano",
-    "gpt-5.4-mini": "gpt-5.4-mini",
-    "QWEN2.5": "Qwen/Qwen2.5-32B-Instruct",
-    "QWEN3": "Qwen/Qwen3-32B",
-    "DeepSeek-R1-32": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
-    "DeepSeek-R1-70": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-    "claude-sonnet-4-6": "claude-sonnet-4-6",
-    "claude-haiku-4-5": "claude-haiku-4-5",
-}
 
 
 class LLMRouter:
     def __init__(
-        self, model_short: str, ports: Tuple[int] | None, instances: int | None = None
+        self,
+        model: str,
+        instances: int | None = None,
+        provider: str = "anthropic",
+        openai_base_url: str | None = None,
     ):
-        self.model_name = MODEL_MAP.get(model_short)
-        if self.model_name is None:
-            raise ValueError(f"Unknown model: {model_short}")
-        self.refresh(ports, instances)
+        if provider not in {"openai", "anthropic"}:
+            raise ValueError(f"Unknown provider: {provider}")
+        if not model.strip():
+            raise ValueError("Model ID must not be empty")
 
-    def refresh(self, ports=None, instances=None):
-        if "qwen" in self.model_name.lower() or "deepseek" in self.model_name.lower():  # type: ignore
-            if ports is None:
-                raise ValueError(
-                    f"Ports must be specified for local model {self.model_name}"
-                )
-            self.clients = self._discover_local(ports)
-        else:
-            if instances is None:
-                raise ValueError(
-                    f"Instances must be specified for remote model {self.model_name}"
-                )
-            self.clients = [self._build_remote_client() for _ in range(instances)]
+        self.provider = provider
+        self.model_name = model
+        self.openai_base_url = openai_base_url
+        self.refresh(instances)
+
+    def refresh(self, instances=None):
+        if instances is None:
+            raise ValueError(
+                f"Instances must be specified for model {self.model_name}"
+            )
+        self.clients = [self._build_client() for _ in range(instances)]
         self.cycle = cycle(self.clients)
 
-    def _discover_local(self, ports):
-        available = []
-        for p in ports:
-            try:
-                r = requests.get(f"http://127.0.0.1:{p}/v1/models", timeout=2)
-                if r.status_code == 200:
-                    data = r.json().get("data", [{}])[0]
-                    print(f"Port {p}: Hosting model - {data.get('id')}")
-
-                try:
-                    if data.get("id") == self.model_name:
-                        available.append(self._build_local_client(p))
-                except Exception as e:
-                    print(
-                        f"Error building client for model {self.model_name} on port {p} \n {e}"
-                    )
-                    continue
-            except requests.exceptions.RequestException:
-                print(f"Port {p}: No response")
-                continue
-
-        if not available:
-            raise RuntimeError(f"No VLLM ports hosting {self.model_name}")
-
-        return available
-
-    def _build_local_client(self, port):
-        if self.model_name == MODEL_MAP["QWEN2.5"]:
-            llm_client = AgentClient(
-                base_url=f"http://127.0.0.1:{port}/v1", api_key="EMPTY"
-            )
-            llm_request_params = {
-                "model": "Qwen/Qwen2.5-32B-Instruct",
-                "text": {"format": {"type": "json_object"}},
-                "temperature": 1,
-            }
-        elif self.model_name == MODEL_MAP["QWEN3"]:
-            llm_client = AgentClient(
-                base_url=f"http://127.0.0.1:{port}/v1", api_key="EMPTY"
-            )
-            llm_request_params = {
-                "model": "Qwen/Qwen3-32B",
-                "text": {"format": {"type": "json_object"}},
-                "temperature": 1,
-                "max_output_tokens": 256,
-            }
-        elif self.model_name == MODEL_MAP["DeepSeek-R1-32"]:
-            llm_client = AgentClient(
-                base_url=f"http://127.0.0.1:{port}/v1", api_key="EMPTY"
-            )
-            llm_request_params = {
-                "model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
-                "temperature": 1,
-                "post_prompt": "NOTE: do NOT spend too much time and tokens reasoning.",
-            }
-        elif self.model_name == MODEL_MAP["DeepSeek-R1-70"]:
-            llm_client = AgentClient(
-                base_url=f"http://127.0.0.1:{port}/v1", api_key="EMPTY"
-            )
-            llm_request_params = {
-                "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-                "temperature": 1,
-                "post_prompt": "NOTE: do NOT spend too much time and tokens reasoning.",
-            }
-        else:
-            raise ValueError(f"Unsupported local model: {self.model_name}.")
-        return llm_client, llm_request_params
-
-    def _build_remote_client(self):
-        if self.model_name == "o4-mini":
-            llm_client = AgentClient(provider="openai")
-            llm_request_params = {
-                "model": "o4-mini",
-                "text": {"format": {"type": "json_object"}},
-            }
-        elif self.model_name == "o3-mini":
-            llm_client = AgentClient(provider="openai")
-            llm_request_params = {
-                "model": "o3-mini",
-                "text": {"format": {"type": "json_object"}},
-                "reasoning": {"effort": "low"},
-            }
-        elif self.model_name == "gpt-5.1":
-            llm_client = AgentClient(provider="openai")
-            llm_request_params = {
-                "model": "gpt-5.1",
-                "text": {"format": {"type": "json_object"}},
-                "reasoning": {"effort": "low"},
-            }
-        elif self.model_name in {
-            "gpt-5-mini",
-            "gpt-5-nano",
-            "gpt-5.4-nano",
-            "gpt-5.4-mini",
-        }:
-            llm_client = AgentClient(provider="openai")
+    def _build_client(self):
+        if self.provider == "openai":
+            client_kwargs = {"provider": "openai"}
+            if self.openai_base_url is not None:
+                client_kwargs["base_url"] = self.openai_base_url
+            llm_client = AgentClient(**client_kwargs)
             llm_request_params = {
                 "model": self.model_name,
                 "text": {"format": {"type": "json_object"}},
-                "reasoning": {"effort": "low"},
             }
-        elif "claude" in str(self.model_name).lower():
+        else:
             llm_client = AgentClient(provider="anthropic")
             llm_request_params = {
                 "model": self.model_name,
                 "max_output_tokens": 4096,
             }
-        else:
-            raise ValueError(f"Unsupported model: {self.model_name}.")
         return llm_client, llm_request_params
 
     def next(self):

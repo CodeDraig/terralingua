@@ -50,9 +50,10 @@ class SimulationRunner:
 
         # Initialize LLM router
         self.llm_router = LLMRouter(
-            model_short=self.params.agent.model,
-            ports=self.params.run.ports,
+            model=self.params.agent.model,
             instances=self.params.run.max_parallel_workers,
+            provider=self.params.agent.provider,
+            openai_base_url=self.params.agent.openai_base_url,
         )
         self.last_refresh = datetime.now()
         self.refresh_interval = timedelta(hours=1)
@@ -422,7 +423,6 @@ class SimulationRunner:
                     if datetime.now() - self.last_refresh > self.refresh_interval:
                         print("🔄 Refreshing LLM clients... 🔄")
                         self.llm_router.refresh(
-                            ports=self.params.run.ports,
                             instances=self.params.run.max_parallel_workers,
                         )
                         self.last_refresh = datetime.now()
@@ -458,8 +458,7 @@ class SimulationRunner:
                                     "🔄 Attempting to refresh LLM_CLIENTS due to connection error..."
                                 )
                                 self.llm_router.refresh(
-                                    self.params.run.ports,
-                                    self.params.run.max_parallel_workers,
+                                    instances=self.params.run.max_parallel_workers,
                                 )
                     else:
                         # Sequential agent decisions
@@ -479,8 +478,7 @@ class SimulationRunner:
                                         "🔄 Attempting to refresh LLM_CLIENTS due to connection error..."
                                     )
                                     self.llm_router.refresh(
-                                        self.params.run.ports,
-                                        self.params.run.max_parallel_workers,
+                                        instances=self.params.run.max_parallel_workers,
                                     )
                     # ---------------------------
 

@@ -49,6 +49,11 @@ class CheckpointManager:
     def update_parameters(self) -> ExperimentConfig:
         with open(self.exp_logdir / "params.json", "r") as f:
             saved_params = json.load(f)
+        if "provider" not in saved_params.get("agent", {}):
+            raise ValueError(
+                "Saved parameters do not specify an LLM provider; "
+                "this run predates registry-free routing and cannot be resumed."
+            )
         flat_params = {}
         for p in saved_params.values():
             flat_params.update(p)

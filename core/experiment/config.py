@@ -8,6 +8,8 @@ from core.environment.env import AVAILABLE_DEAD_AGENT_FOOD
 from core.genome import AVAILABLE_GENOMES
 from core.utils import ROOT
 
+AVAILABLE_PROVIDERS = ("openai", "anthropic")
+
 
 @dataclass
 class AgentConfig:
@@ -51,9 +53,23 @@ class AgentConfig:
         default="claude-sonnet-4-6",
         metadata={"help": "Model name used for agent decision making"},
     )
+    openai_base_url: str | None = field(
+        default=None,
+        metadata={
+            "help": "Base URL for an OpenAI Responses-compatible endpoint",
+            "arg_type": str,
+        },
+    )
     obs_style: str = field(
         default="list",
         metadata={"help": "Observation style", "choices": list(OBS_STYLE.keys())},
+    )
+    provider: str = field(
+        default="anthropic",
+        metadata={
+            "help": "LLM API provider",
+            "choices": AVAILABLE_PROVIDERS,
+        },
     )
     use_colors: bool = field(
         default=False,
@@ -81,6 +97,10 @@ class AgentConfig:
 
         assert self.exogenous_motivation in AVAILABLE_EX_MOTIVATIONS, (
             f"Exogenous motivation must be one of {AVAILABLE_EX_MOTIVATIONS}, got {self.exogenous_motivation}"
+        )
+
+        assert self.provider in AVAILABLE_PROVIDERS, (
+            f"Provider must be one of {AVAILABLE_PROVIDERS}, got {self.provider}"
         )
 
 
@@ -163,14 +183,6 @@ class RunConfig:
         default=8, metadata={"help": "Max worker threads"}
     )
     max_ts: int = field(default=3000, metadata={"help": "Max simulation timesteps"})
-    ports: tuple = field(
-        default=(9000, 9001, 9002, 9003, 9010, 9011, 9012),
-        metadata={
-            "help": "Ports hosting LLM models",
-            "arg_type": int,
-            "nargs": "+",
-        },
-    )
     save_root: str | None = field(
         default=None, metadata={"help": "Output directory root", "arg_type": str}
     )
@@ -183,8 +195,6 @@ class RunConfig:
 
         if self.save_root is None:
             self.save_root = str(ROOT)
-
-        self.ports = tuple(self.ports)
 
 
 @dataclass
