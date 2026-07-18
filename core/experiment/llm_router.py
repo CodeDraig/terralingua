@@ -12,6 +12,7 @@ MODEL_MAP = {
     "gpt-5-mini": "gpt-5-mini",
     "gpt-5-nano": "gpt-5-nano",
     "gpt-5.4-nano": "gpt-5.4-nano",
+    "gpt-5.4-mini": "gpt-5.4-mini",
     "QWEN2.5": "Qwen/Qwen2.5-32B-Instruct",
     "QWEN3": "Qwen/Qwen3-32B",
     "DeepSeek-R1-32": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
@@ -134,7 +135,12 @@ class LLMRouter:
                 "text": {"format": {"type": "json_object"}},
                 "reasoning": {"effort": "low"},
             }
-        elif self.model_name in {"gpt-5-mini", "gpt-5-nano", "gpt-5.4-nano"}:
+        elif self.model_name in {
+            "gpt-5-mini",
+            "gpt-5-nano",
+            "gpt-5.4-nano",
+            "gpt-5.4-mini",
+        }:
             llm_client = AgentClient(provider="openai")
             llm_request_params = {
                 "model": self.model_name,

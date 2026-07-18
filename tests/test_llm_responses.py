@@ -316,9 +316,10 @@ class ResponsesRouterTests(unittest.TestCase):
             },
         )
 
-    def test_openai_nano_models_use_low_reasoning_and_json_output(self):
-        for model_name in ("gpt-5-nano", "gpt-5.4-nano"):
+    def test_openai_small_models_use_low_reasoning_and_json_output(self):
+        for model_name in ("gpt-5-nano", "gpt-5.4-nano", "gpt-5.4-mini"):
             with self.subTest(model=model_name):
+                self.assertEqual(llm_router.MODEL_MAP[model_name], model_name)
                 router = object.__new__(llm_router.LLMRouter)
                 router.model_name = model_name
 

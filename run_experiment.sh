@@ -13,7 +13,7 @@ args=(
     --agents_name_prefix "being" # Stable tags: being0, being1, etc.
     --name_seed 0 # Seed for procedural names shown to agents.
     --exogenous_motivation "base" # One of: base, creative, none.
-    --genome "ocean_5" # One of: ocean_5, no_traits.
+    --genome "ocean_5" # One of: ocean_5, rpg_6, no_traits.
     --max_history 1 # Past timesteps included in observations.
     --internal_memory_size 150 # Internal-memory token limit.
     --use_internal_memory

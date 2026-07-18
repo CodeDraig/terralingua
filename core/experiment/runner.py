@@ -23,6 +23,7 @@ from core.experiment.config import ExperimentConfig
 from core.experiment.llm_router import LLMRouter
 from core.genome.no_traits import Genome as NoTraitsGenome
 from core.genome.ocean_5 import Genome as Ocean5Genome
+from core.genome.rpg_6 import Genome as RPG6Genome
 from core.utils.generic import create_video
 from core.utils.llm_utils import select_with_retry
 
@@ -68,6 +69,8 @@ class SimulationRunner:
         """Returns the genome class based on parameters."""
         if self.params.agent.genome == "ocean_5":
             return Ocean5Genome
+        elif self.params.agent.genome == "rpg_6":
+            return RPG6Genome
         elif self.params.agent.genome == "no_traits":
             return NoTraitsGenome
         else:

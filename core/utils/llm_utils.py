@@ -24,6 +24,7 @@ MAX_CONTEXT_TOKENS = {
     "gpt-5-mini": {"base": 400_000},
     "gpt-5-nano": {"base": 400_000},
     "gpt-5.4-nano": {"base": 400_000},
+    "gpt-5.4-mini": {"base": 400_000},
     "claude-sonnet-4-5-20250929": {"base": 200_000, "long": 1_000_000},
 }
 
@@ -33,6 +34,7 @@ MAX_OUTPUT_TOKENS = {
     "gpt-5-mini": 128000,
     "gpt-5-nano": 128000,
     "gpt-5.4-nano": 128000,
+    "gpt-5.4-mini": 128000,
     "claude-sonnet-4-5-20250929": 16000,
 }
 
