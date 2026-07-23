@@ -377,6 +377,7 @@ class RunnerConfigurationTests(unittest.TestCase):
         runner._handle_reproduction = mock.Mock()
         runner._cleanup_dead = mock.Mock()
         runner._respawn_if_needed = mock.Mock()
+        runner.exp_logdir = Path("test-log-dir")
 
         fake_thread = mock.Mock()
         with (
@@ -385,10 +386,14 @@ class RunnerConfigurationTests(unittest.TestCase):
                 runner_module.threading, "Thread", return_value=fake_thread
             ),
             mock.patch.object(runner_module, "create_video") as create_video,
+            mock.patch.object(
+                runner_module.AgentLogger, "write_retry_summary"
+            ) as summary,
         ):
             runner.run()
 
         create_video.assert_not_called()
+        summary.assert_called_once()
 
 
 if __name__ == "__main__":

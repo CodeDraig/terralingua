@@ -4,6 +4,7 @@ import importlib
 import json
 import re
 from pathlib import Path
+from time import perf_counter
 from typing import Dict, Tuple
 
 import numpy as np
@@ -103,6 +104,25 @@ class LLMAgent:
         if self.debug:
             self.system_prompt += "\n" + DEBUG_PROMPT.strip()
 
+    def _log_retry_event(self, **event):
+        """Write diagnostics when the active logger supports retry tracking."""
+        log_retry = getattr(self.logger, "log_retry", None)
+        if callable(log_retry):
+            log_retry(
+                agent_name=self.agent_name,
+                agent_tag=self.agent_tag,
+                **event,
+            )
+
+    @staticmethod
+    def _rejection_outcome(error: ResponseRejectedError) -> str:
+        detail = str(error).lower()
+        if "no text output" in detail or "no content" in detail:
+            return "empty"
+        if "status" in detail:
+            return "incomplete"
+        return "rejected"
+
     def select_action(
         self,
         obs: dict,
@@ -147,6 +167,7 @@ class LLMAgent:
         # ================================
         for attempt in range(max_attempts):
             action = None
+            started_at = perf_counter()
             try:
                 resp = client.get_response(
                     messages=messages, request_params=request_params
@@ -154,6 +175,17 @@ class LLMAgent:
             except ResponseRejectedError as e:
                 total_input_tokens += e.input_tokens
                 total_output_tokens += e.output_tokens
+                self._log_retry_event(
+                    timestep=time,
+                    layer="agent_response",
+                    attempt=attempt + 1,
+                    outcome=self._rejection_outcome(e),
+                    input_tokens=e.input_tokens,
+                    output_tokens=e.output_tokens,
+                    elapsed_seconds=perf_counter() - started_at,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                )
                 if self.verbose >= 1:
                     print(
                         f"Rejected response from agent "
@@ -162,10 +194,44 @@ class LLMAgent:
                 if self.verbose >= 2:
                     print(f"Retrying attempt: {attempt + 1}")
                 continue
+            except Exception as e:
+                self._log_retry_event(
+                    timestep=time,
+                    layer="agent_response",
+                    attempt=attempt + 1,
+                    outcome="transport_error",
+                    input_tokens=0,
+                    output_tokens=0,
+                    elapsed_seconds=perf_counter() - started_at,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                )
+                raise
 
-            text = resp.content.strip()  # type: ignore
+            text = str(resp.content or "").strip()
             total_input_tokens += resp.input_tokens
             total_output_tokens += resp.output_tokens
+            if not text:
+                error = ValueError("Empty response content")
+                self._log_retry_event(
+                    timestep=time,
+                    layer="agent_response",
+                    attempt=attempt + 1,
+                    outcome="empty",
+                    input_tokens=resp.input_tokens,
+                    output_tokens=resp.output_tokens,
+                    elapsed_seconds=perf_counter() - started_at,
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                )
+                error_msg = ERROR_MSG.render(
+                    error=error,
+                    action_keys=available_actions.keys(),
+                    use_internal_memory=self.use_internal_memory,
+                )
+                messages.append({"role": "assistant", "content": text})
+                messages.append({"role": "user", "content": error_msg.strip()})
+                continue
             if self.verbose >= 2:
                 print("++++++++++++++")
                 print(f"{self.agent_name}({self.agent_tag})")
@@ -188,9 +254,31 @@ class LLMAgent:
                 action = {"action": act, "message": message, "params": params}
                 if reasoning is not None:
                     action["reasoning"] = reasoning
+                self._log_retry_event(
+                    timestep=time,
+                    layer="agent_response",
+                    attempt=attempt + 1,
+                    outcome="accepted",
+                    input_tokens=resp.input_tokens,
+                    output_tokens=resp.output_tokens,
+                    elapsed_seconds=perf_counter() - started_at,
+                    response_chars=len(text),
+                )
                 break
 
             except Exception as e:
+                self._log_retry_event(
+                    timestep=time,
+                    layer="agent_response",
+                    attempt=attempt + 1,
+                    outcome="malformed",
+                    input_tokens=resp.input_tokens,
+                    output_tokens=resp.output_tokens,
+                    elapsed_seconds=perf_counter() - started_at,
+                    response_chars=len(text),
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                )
                 if self.verbose >= 1:
                     print(
                         f"Error occurred while parsing response of agent {self.agent_name}({self.agent_tag}): {e}"
@@ -211,6 +299,13 @@ class LLMAgent:
         # ================================
 
         if action is None:
+            self._log_retry_event(
+                timestep=time,
+                layer="agent_selection",
+                attempt=max_attempts,
+                outcome="fallback",
+                reason="agent_attempts_exhausted",
+            )
             if self.verbose >= 1:
                 print(
                     f"LLM failed to return a valid response after {max_attempts} attempts. STAYING"

@@ -14,6 +14,7 @@ from typing import Dict
 import numpy as np
 from PIL import Image
 
+from core.agents.agent_logger import AgentLogger
 from core.agents.human_agent import HumanAgent
 from core.agents.llm_agent import LLMAgent
 from core.agents.procedural_names import procedural_name
@@ -114,7 +115,6 @@ class SimulationRunner:
         }
         init_agents.update(init_human_agents)
 
-        positions = {"being0": (10, 10), "being1": (12, 10)}
         self.last_spawn_idx = self.params.env.init_agents - 1
 
         genome_cls = self._get_genome_cls()
@@ -168,7 +168,7 @@ class SimulationRunner:
                     f"{agent_tag} is non-text agent. Not implemented yet."
                 )
 
-        self.obs, self.infos = self.env.restart_env(agent_poses=positions)
+        self.obs, self.infos = self.env.restart_env()
         self.start_ts = 0
         self.rewards = {}
         self.dones = {a: False for a in self.agents.keys()}
@@ -521,6 +521,7 @@ class SimulationRunner:
         self.env.close()
         for agent in self.agents.values():
             agent.close()
+        AgentLogger.write_retry_summary(self.exp_logdir / "agent_logs")
 
         if self.params.run.save_video:
             create_video(

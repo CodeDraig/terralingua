@@ -1,14 +1,20 @@
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from json import loads
 from pathlib import Path
+from unittest import mock
 
+from openai import OpenAIError
+
+from core.agents.agent_logger import AgentLogger
 from core.agents.llm_agent import LLMAgent
 from core.agents.procedural_names import procedural_name
 from core.agents.prompt_templates import AGENT_PROMPT, ERROR_MSG, SYS_PROMPT
 from core.environment.actions import ACTION_TEXT
 from core.environment.artifact import ArtifactCreationError, TextArtifact
 from core.utils.llm_client import Response, ResponseRejectedError
+from core.utils.llm_utils import select_with_retry
 
 
 class _CharacterEncoder:
@@ -23,6 +29,11 @@ class _Logger:
     def __init__(self, log_dir):
         self.log_dir = Path(log_dir)
 
+    def log(self, **_kwargs):
+        return None
+
+
+class _TrackingLogger(AgentLogger):
     def log(self, **_kwargs):
         return None
 
@@ -57,6 +68,17 @@ class _IncompleteThenValidClient:
                 input_tokens=self.input_tokens,
                 output_tokens=self.output_tokens,
             )
+        return Response(content="valid", input_tokens=1, output_tokens=1)
+
+
+class _EmptyThenValidClient:
+    def __init__(self):
+        self.calls = 0
+
+    def get_response(self, messages, request_params):
+        self.calls += 1
+        if self.calls == 1:
+            return Response(content="", input_tokens=4, output_tokens=2)
         return Response(content="valid", input_tokens=1, output_tokens=1)
 
 
@@ -318,6 +340,152 @@ class AgentBoundaryTests(unittest.TestCase):
             self.assertEqual(token_log["total_input_tokens"], 6)
             self.assertEqual(token_log["total_output_tokens"], 4)
 
+    def test_retry_ledger_records_incomplete_then_accepted_response(self):
+        with tempfile.TemporaryDirectory() as experiment_dir:
+            log_dir = Path(experiment_dir) / "agent_logs"
+            agent = self._stub_agent(log_dir)
+            agent.logger = _TrackingLogger(log_dir=log_dir, agent_tag="test")
+            client = _IncompleteThenValidClient(incomplete_count=1)
+
+            agent.select_action(
+                obs={},
+                available_actions={"move": {"params": {"direction": ""}}},
+                reward=0,
+                info=None,
+                time=7,
+                request_params={"model": "test"},
+                client=client,
+                max_attempts=2,
+            )
+
+            events = [
+                loads(line)
+                for line in (log_dir / "retry_events.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(
+                [event["outcome"] for event in events], ["incomplete", "accepted"]
+            )
+            self.assertEqual(events[0]["input_tokens"], 5)
+            self.assertEqual(events[0]["timestep"], 7)
+
+            summary = AgentLogger.write_retry_summary(log_dir)
+            self.assertEqual(summary["api_attempts"], 2)
+            self.assertEqual(summary["incomplete_responses"], 1)
+            self.assertEqual(summary["accepted_responses"], 1)
+            self.assertTrue((Path(experiment_dir) / "retry_summary.json").exists())
+
+    def test_retry_ledger_marks_malformed_attempts_and_agent_fallback(self):
+        with tempfile.TemporaryDirectory() as experiment_dir:
+            log_dir = Path(experiment_dir) / "agent_logs"
+            agent = self._stub_agent(log_dir)
+            agent.logger = _TrackingLogger(log_dir=log_dir, agent_tag="test")
+            agent._parse_response = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                ValueError("invalid action")
+            )
+
+            action = agent.select_action(
+                obs={},
+                available_actions={"move": {"params": {"direction": ""}}},
+                reward=0,
+                info=None,
+                time=3,
+                request_params={"model": "test"},
+                client=_Client(),
+                max_attempts=2,
+            )
+
+            self.assertEqual(action["params"], {"direction": "stay"})
+            summary = AgentLogger.write_retry_summary(log_dir)
+            self.assertEqual(summary["malformed_responses"], 2)
+            self.assertEqual(summary["fallbacks"], 1)
+            self.assertEqual(summary["malformed_or_empty_rate"], 1.0)
+
+    def test_retry_ledger_distinguishes_empty_from_malformed_output(self):
+        with tempfile.TemporaryDirectory() as experiment_dir:
+            log_dir = Path(experiment_dir) / "agent_logs"
+            agent = self._stub_agent(log_dir)
+            agent.logger = _TrackingLogger(log_dir=log_dir, agent_tag="test")
+
+            agent.select_action(
+                obs={},
+                available_actions={"move": {"params": {"direction": ""}}},
+                reward=0,
+                info=None,
+                time=4,
+                request_params={"model": "test"},
+                client=_EmptyThenValidClient(),
+                max_attempts=2,
+            )
+
+            summary = AgentLogger.write_retry_summary(log_dir)
+            self.assertEqual(summary["empty_responses"], 1)
+            self.assertEqual(summary["malformed_responses"], 0)
+            self.assertEqual(summary["malformed_or_empty_rate"], 0.5)
+
+    def test_retry_ledger_writer_keeps_concurrent_events_intact(self):
+        with tempfile.TemporaryDirectory() as experiment_dir:
+            log_dir = Path(experiment_dir) / "agent_logs"
+            logger = AgentLogger(log_dir=log_dir, agent_tag="test")
+
+            def write_event(index):
+                logger.log_retry(
+                    timestep=index,
+                    agent_name="test",
+                    agent_tag="test",
+                    layer="agent_response",
+                    attempt=1,
+                    outcome="accepted",
+                    input_tokens=1,
+                    output_tokens=1,
+                )
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(write_event, range(64)))
+
+            events = [
+                loads(line)
+                for line in (log_dir / "retry_events.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(len(events), 64)
+            self.assertEqual(
+                AgentLogger.write_retry_summary(log_dir)["api_attempts"], 64
+            )
+
+    def test_outer_transport_retries_are_in_the_retry_ledger(self):
+        class UnavailableAgent:
+            agent_name = "test"
+            agent_tag = "test"
+            max_history = 2
+
+            def __init__(self, logger):
+                self.logger = logger
+
+            def select_action(self, **_kwargs):
+                raise OpenAIError("endpoint unavailable")
+
+        with tempfile.TemporaryDirectory() as experiment_dir:
+            log_dir = Path(experiment_dir) / "agent_logs"
+            agent = UnavailableAgent(AgentLogger(log_dir=log_dir, agent_tag="test"))
+
+            with mock.patch("core.utils.llm_utils.time.sleep"):
+                action, refresh_needed = select_with_retry(
+                    agent,
+                    observation={},
+                    available_actions={},
+                    reward=0,
+                    info=None,
+                    ts=9,
+                    llm_client=None,
+                    llm_request_params={},
+                    retries=2,
+                )
+
+            self.assertEqual(action["params"], {"direction": "stay"})
+            self.assertFalse(refresh_needed)
+            summary = AgentLogger.write_retry_summary(log_dir)
+            self.assertEqual(summary["selection_retry_or_fallback_events"], 3)
+            self.assertEqual(summary["fallbacks"], 1)
+
     def test_incomplete_response_exhaustion_falls_back_to_stay(self):
         with tempfile.TemporaryDirectory() as log_dir:
             agent = self._stub_agent(log_dir)
@@ -342,6 +510,7 @@ class AgentBoundaryTests(unittest.TestCase):
         agent.agent_name = "test"
         agent.agent_tag = "test"
         agent.internal_memory = ""
+        agent.use_internal_memory = False
         agent.history = []
         agent.max_history = 0
         agent.verbose = 0

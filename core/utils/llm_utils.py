@@ -39,6 +39,23 @@ MAX_OUTPUT_TOKENS = {
 }
 
 
+def _log_selection_retry(agent: ActionSelectingAgent, **event: Any) -> None:
+    """Emit an outer-selection diagnostic without requiring every agent type."""
+    log_event = getattr(agent, "_log_retry_event", None)
+    if callable(log_event):
+        log_event(**event)
+        return
+
+    logger = getattr(agent, "logger", None)
+    log_retry = getattr(logger, "log_retry", None)
+    if callable(log_retry):
+        log_retry(
+            agent_name=agent.agent_name,
+            agent_tag=agent.agent_tag,
+            **event,
+        )
+
+
 def select_with_retry(
     agent: ActionSelectingAgent,
     observation,
@@ -67,17 +84,49 @@ def select_with_retry(
             agent.max_history = original_history_len
             return action, False
         except BadRequestError as e:
+            _log_selection_retry(
+                agent,
+                timestep=ts,
+                layer="outer_selection",
+                attempt=attempt + 1,
+                outcome="retry",
+                reason="bad_request",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             print(
                 f"⚠️ Retry {attempt + 1}/{retries} {agent.agent_name}({agent.agent_tag}) Bad Request: {e}. Likely cause is too many tokens"
             )
             agent.max_history = max(0, agent.max_history - 1)
         except (RateLimitError, APIConnectionError, OpenAIError) as e:
             wait_time = backoff_base**attempt + random.uniform(0, 0.5)
+            _log_selection_retry(
+                agent,
+                timestep=ts,
+                layer="outer_selection",
+                attempt=attempt + 1,
+                outcome="retry",
+                reason="provider_error",
+                error_type=type(e).__name__,
+                error_message=str(e),
+                wait_seconds=wait_time,
+            )
             print(
                 f"⚠️ Retry {attempt + 1}/{retries} {agent.agent_name}({agent.agent_tag}) due to error: {e}. Sleep {wait_time:.2f}s"
             )
             time.sleep(wait_time)
         except requests.exceptions.RequestException as e:
+            _log_selection_retry(
+                agent,
+                timestep=ts,
+                layer="outer_selection",
+                attempt=attempt + 1,
+                outcome="fallback",
+                reason="connection_error",
+                error_type=type(e).__name__,
+                error_message=str(e),
+                needs_client_refresh=True,
+            )
             # Indicate a connection error so the configured clients are rebuilt.
             print(f"⚠️ Connection error {agent.agent_name}({agent.agent_tag}): {e}")
             agent.max_history = original_history_len
@@ -88,6 +137,16 @@ def select_with_retry(
                 "params": {"direction": "stay"},
             }, True
         except Exception as e:
+            _log_selection_retry(
+                agent,
+                timestep=ts,
+                layer="outer_selection",
+                attempt=attempt + 1,
+                outcome="fallback",
+                reason="unexpected_error",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             print(f"❌ Unexpected failure {agent.agent_name}({agent.agent_tag}): {e}")
             agent.max_history = original_history_len
             traceback.print_exc()
@@ -98,6 +157,14 @@ def select_with_retry(
             }, False
 
     print(f"❌ Failed after {retries} retries {agent.agent_name}({agent.agent_tag}).")
+    _log_selection_retry(
+        agent,
+        timestep=ts,
+        layer="outer_selection",
+        attempt=retries,
+        outcome="fallback",
+        reason="outer_attempts_exhausted",
+    )
     agent.max_history = original_history_len
     traceback.print_exc()
     return {"action": "move", "message": "", "params": {"direction": "stay"}}, False
