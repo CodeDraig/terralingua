@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TerraLingua — Multi-Agent Ecology & Cultural Evolution Explorer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-gradient: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+      --card-bg: rgba(30, 41, 59, 0.7);
+      --card-border: rgba(255, 255, 255, 0.1);
+      --accent-cyan: #38bdf8;
+      --accent-emerald: #34d399;
+      --accent-pink: #f472b6;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-gradient);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 1.5rem 2rem;
+      background: rgba(15, 23, 42, 0.8);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      background: linear-gradient(90deg, var(--accent-cyan), var(--accent-emerald));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .badge {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent-cyan);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+
+    main {
+      flex: 1;
+      padding: 2rem;
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 2rem;
+      max-width: 1600px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .control-panel {
+      grid-column: 1 / -1;
+      background: var(--card-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--card-border);
+      border-radius: 1rem;
+      padding: 1.25rem 1.75rem;
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+    }
+
+    button {
+      background: linear-gradient(135deg, #0284c7, #0d9488);
+      color: white;
+      border: none;
+      padding: 0.6rem 1.25rem;
+      border-radius: 0.5rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    button:hover { opacity: 0.9; transform: translateY(-1px); }
+
+    input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent-cyan);
+    }
+
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--card-border);
+      border-radius: 1rem;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .canvas-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 0.75rem;
+      padding: 1rem;
+    }
+
+    canvas {
+      border-radius: 0.5rem;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+    }
+
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .stat-label { color: var(--text-muted); font-size: 0.875rem; }
+    .stat-val { font-weight: 600; }
+
+    .phylogeny-tree {
+      max-height: 250px;
+      overflow-y: auto;
+      font-size: 0.85rem;
+    }
+
+    .artifact-item {
+      padding: 0.5rem;
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 0.375rem;
+      margin-bottom: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TerraLingua Racket Engine Explorer</h1>
+    <span class="badge">Phase 9 Web Dashboard</span>
+  </header>
+
+  <main>
+    <div class="control-panel">
+      <input type="file" id="log-file-input" accept=".jsonl,.json">
+      <button id="btn-play">Play</button>
+      <span class="stat-label">Step:</span>
+      <input type="range" id="step-slider" min="0" max="100" value="0">
+      <span id="step-display" class="stat-val">0 / 0</span>
+      <span id="status-line" style="color: var(--accent-pink); margin-left: 1rem;"></span>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size: 1.1rem; font-weight: 600;">Simulation Grid Canvas</h2>
+      <div class="canvas-container">
+        <canvas id="grid-canvas" width="600" height="600"></canvas>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+      <div class="card">
+        <h2 style="font-size: 1.1rem; font-weight: 600;">Ecology Metrics</h2>
+        <div class="stat-row">
+          <span class="stat-label">Living Beings</span>
+          <span id="stat-living" class="stat-val">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Food Tiles</span>
+          <span id="stat-food" class="stat-val">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Active Artifacts</span>
+          <span id="stat-artifacts" class="stat-val">0</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 style="font-size: 1.1rem; font-weight: 600;">Artifact Phylogeny</h2>
+        <div id="phylogeny-container" class="phylogeny-tree">
+          <p style="color: var(--text-muted);">Load events.jsonl to explore artifacts.</p>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -13,3 +13,8 @@ plots/
 *.pdf
 *-checkpoint.ipynb
 *.svg
+
+# Racket bytecode (rkt/ rebuild)
+**/compiled/
+**/*.zo
+**/*.dep
