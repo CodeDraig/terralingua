@@ -48,6 +48,7 @@
 (check-equal? (hash-ref core-cfg 'exp-name) "core_run")
 (check-equal? (hash-ref core-cfg 'exogenous-motivation) 'base)
 (check-equal? (hash-ref core-cfg 'genome) 'ocean5)
+(check-equal? (hash-ref core-cfg 'max-parallel-workers) 8)
 
 (define creative-cfg (get-cfg "creative.rkt"))
 (check-equal? (hash-ref creative-cfg 'exogenous-motivation) 'creative)

@@ -58,6 +58,7 @@
             'reproduction-cost #,(get-val '#:reproduction-cost #'50)
             'reproduction-allowed #,(get-val '#:reproduction-allowed #'#t)
             'inert-artifacts #,(get-val '#:inert-artifacts #'#f)
+            'max-parallel-workers #,(get-val '#:max-parallel-workers #'8)
             'ckpt-interval #,(get-val '#:ckpt-interval #'10)))
          (provide config)
          (module+ main

@@ -22,6 +22,7 @@
          pos-add
          chebyshev
          world-agent
+         agent-trajectory-chronological
          world-add-agent
          world-with-agent
          world-move-agent
@@ -68,7 +69,7 @@
    time-left
    color      ; #f | string
    inventory  ; (listof string) — artifact names, set semantics
-   trajectory ; (listof pos), append-only
+   trajectory ; (listof pos), newest first for O(1) extension
    spawn      ; (listof symbol) — child tags
    last-message) ; string — this step's broadcast, "" if none
   #:prefab)
@@ -147,6 +148,11 @@
   (hash-ref (world-agents w) tag
             (λ () (error 'world-agent "no agent with tag ~a" tag))))
 
+;; Live trajectories are stored newest-first so movement can extend them in
+;; O(1). Consumers and archived trajectories retain chronological order.
+(define (agent-trajectory-chronological a)
+  (reverse (agent-trajectory a)))
+
 (define (world-add-agent w a)
   (define tag (agent-tag a))
   (define pos (agent-pos a))
@@ -206,7 +212,7 @@
                [dead-names (cons (agent-name a) (world-dead-names w))]
                [archived-trajectories
                 (hash-set (world-archived-trajectories w) tag
-                          (agent-trajectory a))]))
+                          (agent-trajectory-chronological a))]))
 
 ;; Insert a new artifact (name must not already exist).
 (define (world-put-artifact w a)

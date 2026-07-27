@@ -79,5 +79,36 @@
 (define avail-low (available-actions w-low 'being0))
 (check-false (hash-has-key? avail-low "teleport") "teleport action unavailable when energy < 10")
 
+;; A custom action may deliberately replace a built-in schema and handler.
+;; Built-in parameter normalization applies only when the custom entry is not
+;; available for this agent.
+(define-action custom-move
+  #:name "move"
+  #:description "Custom movement mode."
+  #:params (hash "mode" "Custom movement mode")
+  #:available (λ (w tag) (>= (agent-energy (world-agent w tag)) 10))
+  #:handler
+  (λ (w tag params prg)
+    (values w
+            '()
+            (list (cons "Custom move" (hash-ref params "mode")))
+            #f)))
+
+(define-values (_custom-w _custom-events custom-infos _custom-delta)
+  (execute-action w1 'being0
+                  (action "move" (hash "mode" "phase") "")
+                  prg))
+(check-equal? custom-infos
+              (list (cons "Custom move" "phase"))
+              "custom action shadowing a built-in uses its own parameters")
+
+(define-values (_builtin-w _builtin-events _builtin-infos builtin-delta)
+  (execute-action w-low 'being0
+                  (action "move" (hash "direction" "right") "")
+                  prg))
+(check-equal? builtin-delta
+              (pos 0 1)
+              "unavailable custom action falls back to the built-in action")
+
 ;; Clean up registry after tests
 (clear-custom-actions!)

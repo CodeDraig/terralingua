@@ -13,15 +13,27 @@
 
 (provide step)
 
+(define fallback-action (action "move" (hash "direction" "stay") ""))
+
 (define (step w actions prg)
   (define step-n (world-step-count w))
   (define p (world-params w))
+  (define living-tags (sort (hash-keys (world-agents w)) symbol<?))
+  (define unknown-tags
+    (sort
+     (filter (λ (tag) (not (hash-has-key? (world-agents w) tag)))
+             (hash-keys actions))
+     symbol<?))
+  (unless (null? unknown-tags)
+    (raise-arguments-error 'step
+                           "actions contain tags that are not living agents"
+                           "unknown-tags" unknown-tags))
 
   ;; ---- S1–S4: per acting agent -------------------------------------------
   (define-values (w1 events1 infos)
     (for/fold ([w w] [evts '()] [infos (hash)])
-              ([tag (in-list (sort (hash-keys actions) symbol<?))])
-      (define act (hash-ref actions tag))
+              ([tag (in-list living-tags)])
+      (define act (hash-ref actions tag fallback-action))
       ;; S1+S2: validate & execute
       (define-values (w* ev info move)
         (execute-action w tag act prg))
@@ -78,18 +90,14 @@
   (define new-cell (if (and dest (not blocked?)) dest (agent-pos a)))
   ;; position + trajectory + index (via world-move-agent so the index
   ;; stays in sync — no inline pos->agent patching)
-  (define-values (w1 a1)
-    (if (and dest (not blocked?))
-        (values (world-move-agent w
-                                  (struct-copy agent a
-                                               [pos new-cell]
-                                               [trajectory (append (agent-trajectory a)
-                                                                   (list new-cell))]))
-                (struct-copy agent a
-                             [pos new-cell]
-                             [trajectory (append (agent-trajectory a)
-                                                 (list new-cell))]))
-        (values w a)))
+  (define moved? (and dest (not blocked?)))
+  (define a1
+    (if moved?
+        (struct-copy agent a
+                     [pos new-cell]
+                     [trajectory (cons new-cell (agent-trajectory a))])
+        a))
+  (define w1 (if moved? (world-move-agent w a1) w))
   ;; eat
   (define-values (w2 a2)
     (if (hash-has-key? (world-food w1) new-cell)
@@ -155,9 +163,17 @@
     (struct-copy world wc
                  [food (hash-set (world-food wc) cell
                                  (+ v (hash-ref (world-food wc) cell 0)))]))
-  (for/fold ([w w] [evts '()])
-            ([(tag a) (in-hash (world-agents w))]
-             #:when (or (<= (agent-energy a) 0) (<= (agent-time-left a) 0)))
+  (define dying-tags
+    (sort
+     (for/list ([(tag a) (in-hash (world-agents w))]
+                #:when (or (<= (agent-energy a) 0)
+                           (<= (agent-time-left a) 0)))
+       tag)
+     symbol<?))
+  (define-values (w* reversed-events)
+    (for/fold ([w w] [evts '()])
+              ([tag (in-list dying-tags)])
+    (define a (hash-ref (world-agents w) tag))
     (define reason (if (<= (agent-time-left a) 0) 'old-age 'hunger))
     (define cell (agent-pos a))
     ;; drop inventory at the death cell
@@ -183,3 +199,4 @@
                        (hash 'tag tag 'name (agent-name a) 'pos cell
                              'reason reason 'energy (agent-energy a)))
                   evts))))
+  (values w* (reverse reversed-events)))

@@ -136,6 +136,14 @@
                    (and n (integer? n) (inexact->exact n)))]
     [else default]))
 
+(define (parse-exact-integer v)
+  (cond
+    [(exact-integer? v) v]
+    [(string? v)
+     (define n (string->number v))
+     (and (exact-integer? n) n)]
+    [else #f]))
+
 ;; Random free 8-neighbor cell (wraps — spec §10 change #11), or #f.
 ;; Only rejects cells with other agents; allows food and artifacts
 ;; (the child consumes any food immediately on its first step).
@@ -161,7 +169,7 @@
 ;; info: (listof (cons string string)); move-delta: pos or #f.
 
 (define (handle-move w tag params prg)
-  (define delta (hash-ref move-deltas (hash-ref params "direction" "stay") (pos 0 0)))
+  (define delta (hash-ref move-deltas (hash-ref params "direction")))
   (values w '() '() delta))
 
 (define (handle-energy-transfer w tag act-name params prg)
@@ -181,22 +189,14 @@
                                   act-name target-name)))
               #f)
       (let* ([t (world-agent w target-tag)]
-             [raw-amount (hash-ref params "amount" 0)]
-             [coerced-amount (coerce-number raw-amount)]
-             [amount (max coerced-amount 0)]
-             [bad-amount? (not (real? raw-amount))]
+             [amount (hash-ref params "amount")]
              [give? (equal? act-name "give")]
              [xfer (if give?
                        (min amount (agent-energy a))
                        (min amount (agent-energy t)))]
              [a* (struct-copy agent a [energy ((if give? - +) (agent-energy a) xfer)])]
              [t* (struct-copy agent t [energy ((if give? + -) (agent-energy t) xfer)])]
-             [w* (world-with-agent (world-with-agent w a*) t*)]
-             [info
-              (if bad-amount?
-                  (list (cons "Action outcome"
-                              (format "amount=~a is not a number; treating as 0" raw-amount)))
-                  '())])
+             [w* (world-with-agent (world-with-agent w a*) t*)])
         (values w*
                 (list (evt (if give? 'gift-energy 'take-energy)
                            (hash 'tag tag 'name (agent-name a)
@@ -204,7 +204,7 @@
                                  'amount xfer
                                  'final-energy (agent-energy a*)
                                  'target-final-energy (agent-energy t*))))
-                info
+                '()
                 #f))))
 
 (define (handle-set-color w tag params prg)
@@ -444,31 +444,53 @@
 ;; SPEC §2 S1: validate against available-actions (exact param keys); on
 ;; mismatch coerce to move/stay with an info note (spec §10 change #4).
 
+(define (normalize-params name params)
+  (cond
+    [(equal? name "move")
+     (and (hash-has-key? move-deltas (hash-ref params "direction" #f))
+          params)]
+    [(member name '("give" "take"))
+     (define amount (parse-exact-integer (hash-ref params "amount" #f)))
+     (and (exact-positive-integer? amount)
+          (hash-set params "amount" amount))]
+    [else params]))
+
 (define (execute-action w tag act prg)
   (define avail (available-actions w tag))
   (define name (action-name act))
   (define params (action-params act))
-  (define valid?
+  (define registered-custom-entry
+    (hash-ref (custom-actions-registry) name #f))
+  (define custom-entry
+    (and registered-custom-entry
+         ((custom-action-entry-availability-proc registered-custom-entry)
+          w tag)
+         registered-custom-entry))
+  (define valid-keys?
     (and (hash-has-key? avail name)
          (equal? (list->set (hash-keys params))
                  (list->set (hash-keys
                              (hash-ref (hash-ref avail name) 'params))))))
-  (if (not valid?)
+  (define normalized-params
+    (and valid-keys?
+         (if custom-entry
+             params
+             (normalize-params name params))))
+  (if (not normalized-params)
       (values w '()
               (list (cons "Action outcome"
                           (format "Unknown action or incorrect params: ~a" name)))
               (pos 0 0))
-      (let ([custom-entry (hash-ref (custom-actions-registry) name #f)])
-        (cond
-          [custom-entry
-           ((custom-action-entry-handler-proc custom-entry) w tag params prg)]
-        [(equal? name "move") (handle-move w tag params prg)]
+      (cond
+        [custom-entry
+         ((custom-action-entry-handler-proc custom-entry) w tag normalized-params prg)]
+        [(equal? name "move") (handle-move w tag normalized-params prg)]
         [(or (equal? name "give") (equal? name "take"))
-         (handle-energy-transfer w tag name params prg)]
-        [(equal? name "set_color") (handle-set-color w tag params prg)]
-        [(equal? name "reproduce") (handle-reproduce w tag params prg)]
-        [(equal? name "create_artifact") (handle-create-artifact w tag params prg)]
-        [(equal? name "pickup_artifact") (handle-pickup w tag params prg)]
-        [(equal? name "drop_artifact") (handle-drop w tag params prg)]
-        [(equal? name "give_artifact") (handle-give-artifact w tag params prg)]
-        [else (handle-artifact-defined w tag name params prg)]))))
+         (handle-energy-transfer w tag name normalized-params prg)]
+        [(equal? name "set_color") (handle-set-color w tag normalized-params prg)]
+        [(equal? name "reproduce") (handle-reproduce w tag normalized-params prg)]
+        [(equal? name "create_artifact") (handle-create-artifact w tag normalized-params prg)]
+        [(equal? name "pickup_artifact") (handle-pickup w tag normalized-params prg)]
+        [(equal? name "drop_artifact") (handle-drop w tag normalized-params prg)]
+        [(equal? name "give_artifact") (handle-give-artifact w tag normalized-params prg)]
+        [else (handle-artifact-defined w tag name normalized-params prg)])))

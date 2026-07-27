@@ -154,7 +154,8 @@
   (define-values (w2 ev2 in2) (step w1 (hash) prg))
   (check-false (hash-has-key? (world-artifacts w2) "ephemeral")
                "and expires the next step")
-  (check-equal? (event-types ev2) '(artifact-removed)))
+  (check-equal? (event-types ev2)
+                '(artifact-passive-interaction artifact-removed)))
 
 ;; ---- give_artifact ----------------------------------------------------------
 (let* ([w (mk-world (list (mk-agent 'being0 "Aaa" (pos 2 2) 50)
@@ -171,7 +172,8 @@
     (step w2 (hash 'being0 (act "give_artifact"
                                 (hash "artifact_name" "gem" "target_agent" "Bbb")))
           prg))
-  (check-equal? (event-types ev3) '(give-artifact))
+  (check-equal? (event-types ev3)
+                '(give-artifact artifact-passive-interaction))
   (check-true (and (member "gem" (agent-inventory (world-agent w3 'being1))) #t))
   (check-false (member "gem" (agent-inventory (world-agent w3 'being0))))
   (check-equal? (check-invariants w3) '()))
@@ -187,6 +189,105 @@
   (define-values (w2 ev2 in2)
     (step w (hash 'being0 (act "move" (hash "dir" "up"))) prg))
   (check-equal? (pos-of w2 'being0) (pos 2 2) "wrong param keys -> stay"))
+
+;; ---- step roster authority and value validation -----------------------------
+(let* ([w (mk-world (list (mk-agent 'being0 "Aaa" (pos 2 2) 50)
+                          (mk-agent 'being1 "Bbb" (pos 3 3) 50))
+                    (hash (pos 3 3) 7))]
+       [stay (act "move" (hash "direction" "stay"))])
+  (define-values (w1 _events infos)
+    (step w (hash 'being0 stay) (make-pseudo-random-generator)))
+  (check-equal? (energy-of w1 'being0) 49)
+  (check-equal? (energy-of w1 'being1) 56
+                "missing action defaults to stay and still eats/drains")
+  (check-true (hash-has-key? infos 'being1))
+  (check-exn
+   #rx"not living agents"
+   (λ ()
+     (step w (hash 'ghost stay) (make-pseudo-random-generator))))
+  (define dead-world (world-remove-agent w 'being1))
+  (check-exn
+   #rx"not living agents"
+   (λ ()
+     (step dead-world
+           (hash 'being1 stay)
+           (make-pseudo-random-generator)))))
+
+(let ([w (mk-world (list (mk-agent 'being0 "Aaa" (pos 0 0) 50)
+                         (mk-agent 'being1 "Bbb" (pos 0 1) 20)))])
+  (define-values (string-w string-events _string-info)
+    (step w
+          (hash 'being0
+                (act "give" (hash "target" "Bbb" "amount" "5")))
+          (make-pseudo-random-generator)))
+  (check-equal? (energy-of string-w 'being0) 44)
+  (check-equal? (energy-of string-w 'being1) 24)
+  (check-equal? (hash-ref (event-data (car string-events)) 'amount) 5)
+
+  (for ([invalid
+         (in-list
+          (list 1.5 5.0 0 -1 +nan.0 +inf.0 "-2" "1.5" "5.0"))])
+    (define-values (invalid-w invalid-events invalid-info)
+      (step w
+            (hash 'being0
+                  (act "give" (hash "target" "Bbb" "amount" invalid)))
+            (make-pseudo-random-generator)))
+    (check-equal? invalid-events '() (format "reject amount ~s" invalid))
+    (check-equal? (energy-of invalid-w 'being0) 49)
+    (check-equal? (energy-of invalid-w 'being1) 19)
+    (check-true
+     (and (assoc "Action outcome" (hash-ref invalid-info 'being0)) #t)))
+
+  (define-values (bad-move-w bad-move-events bad-move-info)
+    (step w
+          (hash 'being0
+                (act "move"
+                     (hash "direction" "teleport-north-by-regret")))
+          (make-pseudo-random-generator)))
+  (check-equal? (pos-of bad-move-w 'being0) (pos 0 0))
+  (check-equal? bad-move-events '())
+  (check-true
+   (and (assoc "Action outcome" (hash-ref bad-move-info 'being0)) #t)))
+
+;; ---- trajectory storage is O(1) internally, chronological externally --------
+(let* ([start (pos 2 2)]
+       [w (mk-world (list (mk-agent 'being0 "Aaa" start 50)))])
+  (define-values (w1 _e1 _i1)
+    (step w
+          (hash 'being0 (act "move" (hash "direction" "right")))
+          (make-pseudo-random-generator)))
+  (define-values (w2 _e2 _i2)
+    (step w1
+          (hash 'being0 (act "move" (hash "direction" "right")))
+          (make-pseudo-random-generator)))
+  (define a2 (world-agent w2 'being0))
+  (check-equal? (agent-trajectory a2)
+                (list (pos 2 4) (pos 2 3) start)
+                "live storage is newest-first")
+  (check-equal? (agent-trajectory-chronological a2)
+                (list start (pos 2 3) (pos 2 4)))
+  (define archived (world-remove-agent w2 'being0))
+  (check-equal? (hash-ref (world-archived-trajectories archived) 'being0)
+                (list start (pos 2 3) (pos 2 4))
+                "archived trajectories remain chronological"))
+
+;; ---- simultaneous deaths emit sorted events ---------------------------------
+(let* ([agents
+        (for/list ([i (in-range 8)])
+          (struct-copy
+           agent
+           (mk-agent (string->symbol (format "being~a" i))
+                     (format "B~a" i)
+                     (pos i 0)
+                     10)
+           [time-left 1]))]
+       [w (mk-world agents)])
+  (define-values (_w1 death-events _infos)
+    (step w (hash) (make-pseudo-random-generator)))
+  (check-equal?
+   (map (λ (e) (hash-ref (event-data e) 'tag)) death-events)
+   (for/list ([i (in-range 8)])
+     (string->symbol (format "being~a" i)))))
 
 ;; ---- death by hunger: food drop, archive, I4 --------------------------------
 (let* ([w (mk-world (list (mk-agent 'being0 "Aaa" (pos 4 4) 1)))]

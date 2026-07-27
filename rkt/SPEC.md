@@ -11,8 +11,10 @@ collected in §10. Where this spec and the Python code disagree, this spec wins.
   branch — removed.)
 - **Agent**: tag (symbol, stable, e.g. `being0`), display name (string, unique
   across living *and* dead agents), position, energy, time-left, color
-  (`#f` | string), inventory (set of artifact names), trajectory (append-only),
-  spawn (list of child tags).
+  (`#f` | string), inventory (set of artifact names), trajectory (append-only).
+  Live trajectories are stored newest-first for O(1) extension and exposed in
+  chronological order through `agent-trajectory-chronological`; archived
+  trajectories are chronological. Spawn is a list of child tags.
 - **Food**: hash pos → value. Per step (§2 S7): each tile decays by
   `food-decay-amount` with probability `food-decay-rate`; expired tiles
   (value ≤ 0) are removed; then `Poisson(food-spawn-rate)` new tiles spawn at
@@ -43,6 +45,9 @@ An `Action` is `#s(action name params message)`: name string, params
 pairs returned to the acting agent (fed to its next prompt).
 
 Agents act in **sorted-tag order** (⚠️CHANGE: Python used insertion order).
+`step` derives that roster from the living-agent hash. Missing action entries
+default to `move`/`stay`; entries for non-living tags are rejected before any
+transition.
 For each acting agent, in order:
 
 1. **S1 Validate**: action must be in the agent's available-actions with
@@ -157,14 +162,28 @@ beings), `energy`, `time`, `inventory` (list of `A(text): name`),
 - **I5**: tags unique; display names unique across living and dead.
 - **I6**: `pos->agent` and `name->tag` indices exactly mirror agent state.
 
-## §7 Checkpoint format (v1)
+## §7 Checkpoint format (v2)
 
 One file, atomically written (tmp + rename). Plain `write`-able datum:
 `#s(checkpoint version step prg-state world agents config)` where `prg-state`
 is `pseudo-random-generator->vector` output; `world` is §1 state; `agents` is
-decision state (§5); `config` is §8 params. `version` = 1; loader rejects
-other versions. Resume restores PRG via `vector->pseudo-random-generator` and
-rebuilds observations from state.
+decision state (§5); `config` is §8 params. `version` = 2; the loader rejects
+unsupported versions. Version 2 stores live trajectories newest-first. The
+loader accepts version 1 and migrates its chronological live trajectories.
+Resume restores PRG via `vector->pseudo-random-generator` and rebuilds
+observations from state.
+
+Checkpoint configuration is authoritative on resume. Only enumerated explicit
+runner overrides are applied; `max-steps-override` replaces `max-ts` and is
+persisted in the next checkpoint. Agent LLM calls are bounded by
+`max-parallel-workers` and are prepared from one immutable pre-step world.
+Ctrl+C cancels outstanding workers and checkpoints the last fully committed
+world, decision-state, event-log, and PRG boundary.
+
+The CLI rejects `--config` together with `--checkpoint`; resumed runs use the
+checkpoint configuration plus explicit CLI overrides. `--seed` accepts exact
+integers from 0 through 2³¹−1 and rejects other input before run artifacts are
+created.
 
 ## §8 Config surface
 
@@ -175,7 +194,8 @@ use-internal-memory use-inventory use-colors | grid-size init-agents
 min-agents init-agent-energy init-food food-zones food-mechanism
 agent-lifespan vision-radius dead-agent-food artifact-creation
 artifact-creation-cost inert-artifacts reproduction-allowed reproduction-cost |
-ckpt-interval`. Phase 4: expressed as `#lang terralingua` programs; the 8
+max-parallel-workers ckpt-interval`. Phase 4: expressed as `#lang terralingua`
+programs; the 8
 `paper_experiment_scripts/*.sh` conditions are the port targets.
 
 ## §9 Event schema (v1)

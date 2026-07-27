@@ -3,25 +3,20 @@
 ;;; Phase 3 — the simulation runner.
 ;;; Per step: fan out agent decisions (threads + parallelism) -> collect actions ->
 ;;; world/step -> append events to JSONL log -> checkpoint every ckpt-interval.
-;;; Ctrl+C (exn:break) finishes current step, checkpoints, exits.
+;;; Ctrl+C (exn:break) checkpoints the last fully committed step and exits.
 
 (require racket/file
          racket/path
-         json
          "../world/state.rkt"
          "../world/step.rkt"
          "../world/obs.rkt"
          "../world/actions.rkt"
-         "../genome/main.rkt"
-         "../agent/prompt.rkt"
-         "../agent/parse.rkt"
+         (only-in "../agent/prompt.rkt" observation->string)
          "../agent/memory.rkt"
-         "../llm/transport.rkt"
-         "../llm/agent-call.rkt"
-         "../llm/retry.rkt"
          "../eventlog/writer.rkt"
          "../ui/render.rkt"
          "checkpoint.rkt"
+         "parallel.rkt"
          "spawn.rkt")
 
 (provide run-simulation
@@ -78,18 +73,6 @@
       (map (λ (kv) (format "~a: ~a" (car kv) (cdr kv))) info)
       "; ")]))
 
-;; Format the obs 'messages hash (name -> last broadcast from co-visible
-;; beings) as a "Name: msg; Name2: msg2" string. The prompt template
-;; uses this for the "Incoming messages" section.
-(define (format-co-visible-messages msgs)
-  (cond
-    [(or (not msgs) (hash-empty? msgs)) ""]
-    [else
-     (string-join
-      (for/list ([(name msg) (in-hash msgs)])
-        (format "~a: ~a" name msg))
-      "; ")]))
-
 ;; Append a new history line, capped to max-history.
 (define (append-history dec line)
   (define hist (cons line (agent-decision-state-history dec)))
@@ -99,9 +82,10 @@
       hist))
 
 ;; Build a fresh decision state for an agent that just acted and survived.
-(define (update-decision-state dec obs-text info-text act new-mem memory-budget)
+(define (update-decision-state dec completed-step obs-text info-text
+                               act new-mem memory-budget)
   (define line (format "[step ~a] obs: ~a; info: ~a; action: ~a; message: ~a"
-                       (agent-decision-state-tag dec)
+                       completed-step
                        obs-text info-text
                        (action-name act) (action-message act)))
   (struct-copy agent-decision-state dec
@@ -109,6 +93,26 @@
                [memory (cap-internal-memory
                         (or new-mem (agent-decision-state-memory dec))
                         memory-budget)]))
+
+(define (clone-prg prg)
+  (vector->pseudo-random-generator
+   (pseudo-random-generator->vector prg)))
+
+;; Custom selectors share the explicit PRG and therefore remain sequential.
+;; The no-transport fallback also uses this path to avoid pointless threads.
+(define (query-agents-serial w states custom-selector prg)
+  (for/fold ([actions (hash)] [mems (hash)] [obss (hash)])
+            ([tag (in-list (sort (hash-keys (world-agents w)) symbol<?))])
+    (define dec (hash-ref states tag #f))
+    (define avail (available-actions w tag))
+    (define obs (observe-agent w tag))
+    (define chosen-act
+      (if custom-selector
+          (custom-selector w tag dec avail prg)
+          (action "move" (hash "direction" "stay") "")))
+    (values (hash-set actions tag chosen-act)
+            mems
+            (hash-set obss tag (observation->string obs)))))
 
 ;; Main simulation runner entry point
 (define (run-simulation config
@@ -120,141 +124,167 @@
                         #:max-steps-override [max-steps-override #f]
                         #:ui? [ui? #f])
 
+  (define resuming? (and resume-ckpt #t))
+
+  ;; Validate and restore before opening output resources. Supplying a missing
+  ;; checkpoint is an error, never an implicit fresh run.
+  (define-values (_step prg initial-world initial-states saved-config)
+    (if resuming?
+        (load-checkpoint resume-ckpt)
+        (let ([fresh-prg (make-pseudo-random-generator)])
+          (parameterize ([current-pseudo-random-generator fresh-prg])
+            (random-seed seed))
+          (define p (build-params-from-config config))
+          (define-values (w0 states0)
+            (spawn-initial-agents p config fresh-prg))
+          (values 0 fresh-prg w0 states0 config))))
+
+  ;; Checkpoint configuration is authoritative on resume. Enumerated explicit
+  ;; overrides are applied to it and persisted in every subsequent checkpoint.
+  (define cfg
+    (if max-steps-override
+        (hash-set saved-config 'max-ts max-steps-override)
+        saved-config))
+  (define max-ts (config-ref cfg 'max-ts 100))
+  (define ckpt-interval (config-ref cfg 'ckpt-interval 10))
+  (define memory-budget (config-ref cfg 'internal-memory-size 150))
+  (define max-workers (config-ref cfg 'max-parallel-workers 8))
+  (unless (exact-positive-integer? max-workers)
+    (raise-arguments-error 'run-simulation
+                           "max-parallel-workers must be a positive integer"
+                           "max-parallel-workers" max-workers))
+
   (define log-dir (if (string? out-dir) (string->path out-dir) out-dir))
   (make-directory* log-dir)
   (define event-log-file (build-path log-dir "events.jsonl"))
   (define default-ckpt-path (build-path log-dir "checkpoint_latest.rktd"))
   (define logger (open-event-log event-log-file))
 
-  ;; The resume path intentionally skips re-emitting run-started/env-reset
-  ;; so an appended log doesn't get duplicate bootstrap records.
-  (define-values (_step prg w decision-states cfg)
-    (if (and resume-ckpt (file-exists? resume-ckpt))
-        (load-checkpoint resume-ckpt)
-        (let ([prg (make-pseudo-random-generator)])
-          ;; Seed the explicit PRG (not current-pseudo-random-generator):
-          ;; world/genome/llm layers all thread `prg` explicitly, so
-          ;; random-seed outside parameterize would not affect them.
-          (parameterize ([current-pseudo-random-generator prg])
-            (random-seed seed))
-          (define p (build-params-from-config config))
-          (define-values (w0 states0) (spawn-initial-agents p config prg))
-          (log-event! logger 0 (hasheq 'seed seed 'config config
-                                      'grid-size (params-grid-size p)
-                                      'vision-radius (params-vision-radius p))
-                      'run-started)
-          (log-event! logger 0 (hasheq 'agents (hash-keys (world-agents w0))) 'env-reset)
-          (for ([tag (in-list (sort (hash-keys (world-agents w0)) symbol<?))])
-            (define a (world-agent w0 tag))
-            (log-event! logger 0
-                        (evt 'agent-added
-                             (hash 'tag tag 'name (agent-name a) 'pos (agent-pos a)
-                                   'agent-type 'text))))
-          (values 0 prg w0 states0 config))))
+  (define committed-world (box initial-world))
+  (define committed-states (box initial-states))
+  (define committed-prg (box (clone-prg prg)))
 
-  (define max-ts (or max-steps-override (hash-ref cfg 'max-ts #f) (hash-ref cfg "max-ts" 100)))
-  (define ckpt-interval (or (hash-ref cfg 'ckpt-interval #f) (hash-ref cfg "ckpt-interval" 10)))
-  (define memory-budget
-    (or (hash-ref cfg 'internal-memory-size #f)
-        (hash-ref cfg "internal-memory-size" 150)))
+  (define (save-committed!)
+    (define w (unbox committed-world))
+    (save-checkpoint default-ckpt-path
+                     (world-step-count w)
+                     (unbox committed-prg)
+                     w
+                     (unbox committed-states)
+                     cfg))
 
-  (define final-world
-    (with-handlers ([exn:break?
-                     (λ (e)
-                       (printf "\n⚠️ Received break signal (Ctrl+C). Checkpointing and exiting...\n")
-                       (save-checkpoint default-ckpt-path (world-step-count w) prg w decision-states cfg)
-                       (close-event-log logger)
-                       w)])
+  (dynamic-wind
+    void
+    (λ ()
+      (with-handlers
+        ([exn:break?
+          (λ (_e)
+            (parameterize-break
+             #f
+             (printf
+              "\n⚠️ Received break signal (Ctrl+C). Checkpointing last completed step...\n")
+             (save-committed!))
+            (unbox committed-world))])
 
-      (let loop ([w w] [states decision-states])
-        (define current-ts (world-step-count w))
-        (cond
-          [(or (>= current-ts max-ts) (hash-empty? (world-agents w)))
-           (log-event! logger current-ts (hasheq 'reason (if (hash-empty? (world-agents w)) "all-died" "max-steps")) 'end-run)
-           (save-checkpoint default-ckpt-path current-ts prg w states cfg)
-           (close-event-log logger)
-           w]
-          [else
-           ;; Select action per living agent. Also capture the per-agent
-           ;; observation (used next step for history) and any returned
-           ;; internal_memory string.
-           (define-values (actions new-mems new-obss)
-             (for/fold ([acts-h (hash)] [mems-h (hash)] [obss-h (hash)])
-                       ([tag (in-list (sort (hash-keys (world-agents w)) symbol<?))])
-               (define ag (world-agent w tag))
-               (define dec (hash-ref states tag #f))
-               (define avail (available-actions w tag))
-               (define obs (observe-agent w tag))
+        ;; Resume appends to the existing log without duplicate bootstrap
+        ;; records. A fresh run records its initial roster before stepping.
+        (unless resuming?
+          (parameterize-break
+           #f
+           (define p (world-params initial-world))
+           (log-event! logger 0
+                       (hasheq 'seed seed 'config cfg
+                               'grid-size (params-grid-size p)
+                               'vision-radius (params-vision-radius p))
+                       'run-started)
+           (log-event! logger 0
+                       (hasheq 'agents
+                               (sort (hash-keys (world-agents initial-world))
+                                     symbol<?))
+                       'env-reset)
+           (for ([tag (in-list
+                       (sort (hash-keys (world-agents initial-world))
+                             symbol<?))])
+             (define a (world-agent initial-world tag))
+             (log-event! logger 0
+                         (evt 'agent-added
+                              (hash 'tag tag
+                                    'name (agent-name a)
+                                    'pos (agent-pos a)
+                                    'agent-type 'text))))))
 
-                (define-values (chosen-act new-mem)
-                  (cond
-                    [custom-selector
-                     (values (custom-selector w tag dec avail prg) #f)]
-                    [(and transport dec)
-                     (let ([sys-prompt
-                            (render-system-prompt (agent-name ag) (world-params w)
-                                                  (agent-decision-state-motivation dec))])
-                       (call-llm-with-fallback
-                        transport sys-prompt
-                        (λ (hist)
-                          (render-user-prompt
-                           #:history (string-join hist "\n")
-                           #:genome (genome->string (agent-decision-state-genome dec))
-                           #:observation (observation->string obs)
-                           #:messages (format-co-visible-messages (hash-ref obs 'messages))
-                           #:energy (agent-energy ag)
-                           #:time (agent-time-left ag)
-                           #:memory (agent-decision-state-memory dec)
-                           #:available-actions avail))
-                        avail
-                        #:history (agent-decision-state-history dec)))]
-                    [else
-                     (values (action "move" (hash "direction" "stay") "") #f)]))
-
-               (values (hash-set acts-h tag chosen-act)
-                       (if new-mem (hash-set mems-h tag new-mem) mems-h)
-                       (hash-set obss-h tag (observation->string obs)))))
-
-           ;; Step world
-           (define-values (w1 evts infos) (step w actions prg))
-           (for ([e (in-list evts)])
-             (log-event! logger current-ts e))
-
-           ;; Respawn to min-agents
-           (define-values (w2 states* respawn-evts) (respawn-to-minimum w1 states cfg prg))
-           (for ([e (in-list respawn-evts)])
-             (log-event! logger current-ts e))
-
-           ;; Persist per-agent decision state for surviving agents
-           ;; (SPEC §5: history + internal_memory).
-           (define states**
-             (for/fold ([s states*])
-                       ([tag (in-list (hash-keys (world-agents w2)))])
-               (define dec (hash-ref s tag #f))
+        (let loop ([w initial-world] [states initial-states])
+          (define current-ts (world-step-count w))
+          (cond
+            [(or (>= current-ts max-ts) (hash-empty? (world-agents w)))
+             (parameterize-break
+              #f
+              (log-event!
+               logger current-ts
+               (hasheq 'reason
+                       (if (hash-empty? (world-agents w))
+                           "all-died"
+                           "max-steps"))
+               'end-run)
+              (set-box! committed-world w)
+              (set-box! committed-states states)
+              (set-box! committed-prg (clone-prg prg))
+              (save-committed!))
+             w]
+            [else
+             ;; Capture all decision inputs from this pre-step world.
+             (define-values (actions new-mems new-obss)
                (cond
-                 [(not dec) s]
-                 [(not (hash-has-key? actions tag))
-                  ;; Agent was respawned this step — respawn-to-minimum
-                  ;; already set a fresh decision state.
-                  s]
+                 [custom-selector
+                  (query-agents-serial w states custom-selector prg)]
+                 [transport
+                  (query-agents-parallel
+                   w (world-agents w) states transport
+                   #:max-workers max-workers)]
                  [else
-                  (define act (hash-ref actions tag))
-                  (define obs-text (hash-ref new-obss tag ""))
-                  (define info-text (format-info-list (hash-ref infos tag '())))
-                  (define mem (hash-ref new-mems tag #f))
-                  (hash-set s tag
-                            (update-decision-state dec obs-text info-text
-                                                   act mem memory-budget))])))
+                  (query-agents-serial w states #f prg)]))
 
-           (when ui?
-             (display-world-ascii w2))
+             (define-values (w1 evts infos) (step w actions prg))
+             (define-values (w2 states* respawn-evts)
+               (respawn-to-minimum w1 states cfg prg))
 
-           ;; Checkpoint interval. w2's step-count is current-ts+1
-           ;; (the just-completed step), so the checkpoint's step field
-           ;; must match the world's step-count, not the pre-step current-ts.
-           (when (checkpoint-due? (world-step-count w2) ckpt-interval)
-             (save-checkpoint default-ckpt-path (world-step-count w2) prg w2 states** cfg))
+             ;; Persist per-agent decision state for surviving agents.
+             (define completed-step (world-step-count w2))
+             (define states**
+               (for/fold ([s states*])
+                         ([tag (in-list
+                                (sort (hash-keys (world-agents w2))
+                                      symbol<?))])
+                 (define dec (hash-ref s tag #f))
+                 (cond
+                   [(not dec) s]
+                   [(not (hash-has-key? actions tag))
+                    ;; Respawned this step; it already has fresh state.
+                    s]
+                   [else
+                    (define act (hash-ref actions tag))
+                    (define obs-text (hash-ref new-obss tag ""))
+                    (define info-text
+                      (format-info-list (hash-ref infos tag '())))
+                    (define mem (hash-ref new-mems tag #f))
+                    (hash-set
+                     s tag
+                     (update-decision-state
+                      dec completed-step obs-text info-text
+                      act mem memory-budget))])))
 
-           (loop w2 states**)]))))
+             ;; Event publication, committed state, PRG snapshot, and periodic
+             ;; checkpoint advance under one break-disabled boundary.
+             (parameterize-break
+              #f
+              (for ([e (in-list (append evts respawn-evts))])
+                (log-event! logger current-ts e))
+              (set-box! committed-world w2)
+              (set-box! committed-states states**)
+              (set-box! committed-prg (clone-prg prg))
+              (when (checkpoint-due? completed-step ckpt-interval)
+                (save-committed!)))
 
-  final-world)
+             (when ui? (display-world-ascii w2))
+             (loop w2 states**)]))))
+    (λ () (close-event-log logger))))
